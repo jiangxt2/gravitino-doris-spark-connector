@@ -87,6 +87,19 @@ docker network create --subnet=10.20.30.0/28 --gateway=10.20.30.1 \
 Restarting Docker Desktop or the connector only rebuilds the same network state and does not
 remove the Engine 28 restriction.
 
+## Linux CI requirements
+
+The integration lane runs on Ubuntu 24.04 with Docker Engine 28. Its native cgroup v2
+controller layout makes the image's JDK 17 container-memory detection crash while the FE
+initializes its BDB metadata environment (`NoClassDefFoundError: JVMSystemUtils`,
+apache/doris#60536). The compose file therefore disables JVM container support on the test FE
+with `JAVA_TOOL_OPTIONS=-XX:-UseContainerSupport`. The runner applies no memory limit, so the
+JVM falls back to host detection.
+
+macOS Docker Desktop does not expose this controller layout, so passing integration tests on
+macOS does not prove the Linux CI lane. Record OS, Docker server version, kernel, and cgroup
+version before treating local results as equivalent to CI.
+
 ## Test logs
 
 Gradle XML and HTML reports are under `integration-tests/build/test-results/` and

@@ -26,6 +26,12 @@ services:
     image: ${GOVERNED_DORIS_FE_IMAGE}
     hostname: doris-fe
     entrypoint: ["bash"]
+    environment:
+      # Ubuntu 24.04 runners use a cgroup v2 controller layout that JDK 17
+      # container memory detection fails to parse, crashing the FE's BDB
+      # metadata environment (apache/doris#60536). Disable container support
+      # only for the test FE; the runner applies no memory limit.
+      JAVA_TOOL_OPTIONS: "-XX:-UseContainerSupport"
     ports:
       - "8030"
       - "9030"

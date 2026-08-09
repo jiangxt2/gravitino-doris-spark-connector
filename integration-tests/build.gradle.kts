@@ -40,6 +40,10 @@ dependencies {
   testImplementation(libs.spark.sql)
   testImplementation(libs.testcontainers)
   testImplementation(libs.testcontainers.junit)
+  // testcontainers and Docker Compose output is otherwise silently swallowed
+  // on CI, making any infrastructure startup failure impossible to diagnose.
+  // The slf4j binding is log4j-slf4j2-impl (see log4j2-test.xml), so no
+  // second slf4j implementation may appear on the classpath.
 }
 
 val integrationTest by tasks.registering(Test::class) {

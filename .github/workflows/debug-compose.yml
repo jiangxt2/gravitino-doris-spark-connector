@@ -32,3 +32,9 @@ jobs:
           docker logs doris-doris-fe-1 2>&1 | tail -60
           echo "=== FE container state ==="
           docker inspect doris-doris-fe-1 --format '{{.State.ExitCode}} {{.State.Error}} OOM={{.State.OOMKilled}}'
+          echo "=== fe.out ==="
+          docker cp doris-doris-fe-1:/opt/apache-doris/fe/log/fe.out - 2>/dev/null | tail -60 || echo "no fe.out"
+          echo "=== fe.log tail ==="
+          docker cp doris-doris-fe-1:/opt/apache-doris/fe/log/fe.log - 2>/dev/null | tail -80 || echo "no fe.log"
+          echo "=== fe log dir ==="
+          docker cp doris-doris-fe-1:/opt/apache-doris/fe/log - - 2>/dev/null | tar -tvf - 2>/dev/null | tail -10 || echo "no log dir"

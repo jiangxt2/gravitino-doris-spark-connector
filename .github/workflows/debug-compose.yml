@@ -28,3 +28,7 @@ jobs:
           echo "COMPOSE_EXIT=$?"
           docker compose -f docker-compose.yaml -f docker-compose-network.yaml ps
           docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
+          echo "=== FE container logs ==="
+          docker logs doris-doris-fe-1 2>&1 | tail -60
+          echo "=== FE container state ==="
+          docker inspect doris-doris-fe-1 --format '{{.State.ExitCode}} {{.State.Error}} OOM={{.State.OOMKilled}}'

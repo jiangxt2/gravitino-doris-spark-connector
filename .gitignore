@@ -1,0 +1,9 @@
+.gradle/
+.idea/
+**/build/
+*.iml
+spark-warehouse/
+derby.log
+metastore_db/
+.DS_Store
+integration-tests/.test-logs/

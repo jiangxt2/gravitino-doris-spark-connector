@@ -1,0 +1,86 @@
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: build
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  standalone-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GRADLE_USER_HOME: ${{ runner.temp }}/gravitino-doris-empty-gradle-home
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: corretto
+          java-version: "17"
+      - name: Resolve published dependencies and assemble distribution from an empty cache
+        run: ./gradlew --no-daemon installDist
+
+  unit:
+    needs: standalone-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: corretto
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Verify standalone build
+        run: ./gradlew --no-daemon spotlessCheck test installDist
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-reports
+          path: "**/build/reports/tests/**"
+
+  integration:
+    needs: unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        doris: ["3.0.6.2", "4.0.6"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: corretto
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Run Gravitino, Spark, and Doris integration tests
+        run: ./gradlew --no-daemon integrationTest -PdorisVersion=${{ matrix.doris }}
+      - name: Upload integration reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-reports-${{ matrix.doris }}
+          path: |
+            integration-tests/build/reports/tests/**
+            integration-tests/build/test-results/**

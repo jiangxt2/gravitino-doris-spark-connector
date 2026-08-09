@@ -1,0 +1,47 @@
+[versions]
+assertj = "3.26.3"
+caffeine = "2.9.3"
+dorisConnector = "26.0.0"
+googleJavaFormat = "1.22.0"
+gravitino = "1.3.0"
+guava = "32.1.3-jre"
+junit = "5.11.4"
+mockito = "5.14.2"
+mysql = "8.0.33"
+scala = "2.12.18"
+spark = "3.5.3"
+spotless = "6.25.0"
+testcontainers = "1.21.4"
+
+[libraries]
+assertj-core = { module = "org.assertj:assertj-core", version.ref = "assertj" }
+caffeine = { module = "com.github.ben-manes.caffeine:caffeine", version.ref = "caffeine" }
+doris-spark-connector = { module = "org.apache.doris:spark-doris-connector-spark-3.5", version.ref = "dorisConnector" }
+gravitino-api = { module = "org.apache.gravitino:gravitino-api", version.ref = "gravitino" }
+gravitino-catalog-common = { module = "org.apache.gravitino:gravitino-catalog-common", version.ref = "gravitino" }
+gravitino-catalog-jdbc-common = { module = "org.apache.gravitino:gravitino-catalog-jdbc-common", version.ref = "gravitino" }
+gravitino-catalog-jdbc-doris = { module = "org.apache.gravitino:gravitino-catalog-jdbc-doris", version.ref = "gravitino" }
+gravitino-client = { module = "org.apache.gravitino:gravitino-client-java", version.ref = "gravitino" }
+gravitino-client-runtime = { module = "org.apache.gravitino:gravitino-client-java-runtime", version.ref = "gravitino" }
+gravitino-common = { module = "org.apache.gravitino:gravitino-common", version.ref = "gravitino" }
+gravitino-core = { module = "org.apache.gravitino:gravitino-core", version.ref = "gravitino" }
+gravitino-server = { module = "org.apache.gravitino:gravitino-server", version.ref = "gravitino" }
+gravitino-server-common = { module = "org.apache.gravitino:gravitino-server-common", version.ref = "gravitino" }
+gravitino-spark-common = { module = "org.apache.gravitino:gravitino-spark-common", version.ref = "gravitino" }
+gravitino-spark35 = { module = "org.apache.gravitino:gravitino-spark-3.5_2.12", version.ref = "gravitino" }
+gravitino-spark-runtime35 = { module = "org.apache.gravitino:gravitino-spark-connector-runtime-3.5_2.12", version.ref = "gravitino" }
+guava = { module = "com.google.guava:guava", version.ref = "guava" }
+junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }
+mockito-core = { module = "org.mockito:mockito-core", version.ref = "mockito" }
+mysql-driver = { module = "mysql:mysql-connector-java", version.ref = "mysql" }
+scala-library = { module = "org.scala-lang:scala-library", version.ref = "scala" }
+spark-catalyst = { module = "org.apache.spark:spark-catalyst_2.12", version.ref = "spark" }
+spark-core = { module = "org.apache.spark:spark-core_2.12", version.ref = "spark" }
+spark-sql = { module = "org.apache.spark:spark-sql_2.12", version.ref = "spark" }
+testcontainers = { module = "org.testcontainers:testcontainers", version.ref = "testcontainers" }
+testcontainers-junit = { module = "org.testcontainers:junit-jupiter", version.ref = "testcontainers" }
+
+[plugins]
+spotless = { id = "com.diffplug.spotless", version.ref = "spotless" }

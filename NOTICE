@@ -1,0 +1,14 @@
+Gravitino Doris Spark Connector
+Copyright 2026 Jiang Xintong
+
+This product includes software developed at The Apache Software Foundation
+(https://www.apache.org/).
+
+Portions of this product are adapted from Apache Gravitino. Apache Gravitino
+is licensed under the Apache License, Version 2.0. Its NOTICE file is available
+at https://github.com/apache/gravitino/blob/main/NOTICE.
+
+The assembled distribution includes binary dependencies from Apache Gravitino,
+Apache Spark, and the Apache Doris Spark Connector. Those Apache projects are
+licensed under the Apache License, Version 2.0; their packaged JAR files retain
+their own META-INF license and notice resources.

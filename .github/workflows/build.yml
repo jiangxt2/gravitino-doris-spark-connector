@@ -26,7 +26,7 @@ permissions:
 
 jobs:
   standalone-smoke:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -41,7 +41,7 @@ jobs:
 
   unit:
     needs: standalone-smoke
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -61,7 +61,7 @@ jobs:
 
   integration:
     needs: unit
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -76,6 +76,16 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - name: Run Gravitino, Spark, and Doris integration tests
         run: ./gradlew --no-daemon integrationTest -PdorisVersion=${{ matrix.doris }}
+      - name: Collect container logs
+        if: failure()
+        run: |
+          mkdir -p /tmp/container-logs
+          docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}' \
+            > /tmp/container-logs/containers.txt
+          for c in $(docker ps -aq); do
+            name=$(docker inspect -f '{{.Name}}' "$c" | tr -d '/')
+            docker logs "$c" > "/tmp/container-logs/$name.log" 2>&1 || true
+          done
       - name: Upload integration reports
         if: failure()
         uses: actions/upload-artifact@v4
@@ -84,3 +94,4 @@ jobs:
           path: |
             integration-tests/build/reports/tests/**
             integration-tests/build/test-results/**
+            /tmp/container-logs/**

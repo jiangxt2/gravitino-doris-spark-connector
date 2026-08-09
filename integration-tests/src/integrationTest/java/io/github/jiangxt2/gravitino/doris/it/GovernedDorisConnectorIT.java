@@ -182,7 +182,7 @@ public class GovernedDorisConnectorIT {
         spark.sql(
             "SELECT id, label FROM "
                 + qualified(CATALOG, COMMON_TABLE)
-                + " WHERE id >= 2 AND id <= 3");
+                + " WHERE id >= 2 AND id <= 3 ORDER BY id");
     assertThat(sparkRows(pushed)).containsExactly("2,beta", "3,alphabet");
     String plan = pushed.queryExecution().executedPlan().toString();
     assertThat(plan).contains("DorisScanV2").doesNotContain("JDBCRelation");

@@ -1,0 +1,30 @@
+name: debug-compose
+on:
+  workflow_dispatch:
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Docker environment
+        run: |
+          docker version --format 'server={{.Server.Version}} client={{.Client.Version}}'
+          docker compose version
+      - name: Reproduce Doris compose startup
+        run: |
+          set +e
+          docker network create \
+            --subnet=10.20.30.0/28 --gateway=10.20.30.1 \
+            --opt com.docker.network.bridge.gateway_mode_ipv4=nat-unprotected \
+            gd-debug-net
+          export GOVERNED_DORIS_FE_IMAGE=apache/doris:fe-3.0.6.2
+          export GOVERNED_DORIS_BE_IMAGE=apache/doris:be-3.0.6.2
+          export GOVERNED_DORIS_NETWORK_NAME=gd-debug-net
+          cd integration-tests/src/integrationTest/resources/doris
+          docker compose -f docker-compose.yaml -f docker-compose-network.yaml \
+            up -d --scale doris-be=1 doris-be
+          echo "COMPOSE_EXIT=$?"
+          docker compose -f docker-compose.yaml -f docker-compose-network.yaml ps
+          docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'

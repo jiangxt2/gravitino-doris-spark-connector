@@ -87,6 +87,8 @@ final class DorisTestCluster implements AutoCloseable {
 
   void start() {
     compose.start();
+    assertProjectLabel(FE_SERVICE);
+    assertProjectLabel(BE_SERVICE);
     hostFeAddress = compose.getServiceHost(FE_SERVICE, FE_MYSQL_PORT);
     hostMysqlPort = compose.getServicePort(FE_SERVICE, FE_MYSQL_PORT);
     hostHttpPort = compose.getServicePort(FE_SERVICE, FE_HTTP_PORT);
@@ -155,9 +157,7 @@ final class DorisTestCluster implements AutoCloseable {
   }
 
   private String resolveInternalFeAddress() {
-    Optional<ContainerState> state = compose.getContainerByServiceName(FE_SERVICE);
-    ContainerState fe =
-        state.orElseThrow(() -> new IllegalStateException("Doris FE container is unavailable"));
+    ContainerState fe = requireContainer(FE_SERVICE);
     com.github.dockerjava.api.model.ContainerNetwork settings =
         fe.getContainerInfo().getNetworkSettings().getNetworks().get(network.name());
     if (settings == null || settings.getIpAddress() == null) {
@@ -165,5 +165,20 @@ final class DorisTestCluster implements AutoCloseable {
           "Doris FE is not attached to integration-test network " + network.name());
     }
     return settings.getIpAddress();
+  }
+
+  private void assertProjectLabel(String service) {
+    ContainerState state = requireContainer(service);
+    IntegrationTestContainerLabels.assertProjectLabel(
+        "Doris service " + service,
+        state.getContainerInfo().getConfig() == null
+            ? null
+            : state.getContainerInfo().getConfig().getLabels());
+  }
+
+  private ContainerState requireContainer(String service) {
+    Optional<ContainerState> state = compose.getContainerByServiceName(service);
+    return state.orElseThrow(
+        () -> new IllegalStateException("Doris service container is unavailable: " + service));
   }
 }

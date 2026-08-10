@@ -8,7 +8,7 @@ versions are the compatibility contract of release `0.1.0-SNAPSHOT`:
 | Apache Gravitino Spark runtime | `org.apache.gravitino:gravitino-spark-connector-runtime-3.5_2.12` | 1.3.0 | Apache-2.0 |
 | Apache Gravitino Doris catalog | `org.apache.gravitino:gravitino-catalog-jdbc-doris` | 1.3.0 | Apache-2.0 |
 | Apache Doris Spark Connector | `org.apache.doris:spark-doris-connector-spark-3.5` | 26.0.0 | Apache-2.0 |
-| Apache Spark | `spark-core_2.12`, `spark-sql_2.12`, `spark-catalyst_2.12` | 3.5.3 | Apache-2.0 |
+| Apache Spark | `spark-core_2.12`, `spark-sql_2.12`, `spark-catalyst_2.12` | 3.5.8 | Apache-2.0 |
 | Scala library | `org.scala-lang:scala-library` | 2.12.18 | BSD-3-Clause |
 | MySQL Connector/J | `com.mysql:mysql-connector-j` (Maven relocation from `mysql:mysql-connector-java`) | 8.0.33 | GPL-2.0 with Universal FOSS Exception |
 | Caffeine | `com.github.ben-manes.caffeine:caffeine` | 2.9.3 | Apache-2.0 |
@@ -17,6 +17,10 @@ Spark itself is supplied by the target Spark installation; its coordinates are c
 test baselines rather than duplicate Spark binaries in `spark/jars`. Spark-side Gravitino APIs are
 provided by the published shaded Gravitino runtime, while server APIs are supplied by the target
 Gravitino 1.3.0 installation.
+
+The supported Spark series is 3.5.x with Scala 2.12. Version 3.5.8 is the default dependency and
+the full Doris integration-test baseline. Versions 3.5.0 and 3.5.9 are compatibility-smoke
+boundaries and are not packaged into the distribution.
 
 The Spark-side modules deliberately use JDK collections and validation rather than bundling an
 unshaded Guava JAR into Spark's shared class path. Guava used to compile the server provider is

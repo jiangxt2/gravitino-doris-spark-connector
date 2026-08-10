@@ -33,4 +33,6 @@ dependencies {
   testImplementation(libs.spark.sql)
   testImplementation(libs.spark.catalyst)
   testImplementation(libs.scala.library)
+  // Required to load GravitinoCatalogManager for the static mock in the write-rejection test.
+  testRuntimeOnly(libs.gravitino.client)
 }

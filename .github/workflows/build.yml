@@ -15,7 +15,7 @@ name: build
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [master]
 
 concurrency:
   group: build-${{ github.workflow }}-${{ github.ref }}
@@ -51,7 +51,7 @@ jobs:
           java-version: "17"
       - uses: gradle/actions/setup-gradle@v4
       - name: Verify standalone build
-        run: ./gradlew --no-daemon spotlessCheck test installDist
+        run: ./gradlew --no-daemon spotlessCheck test installDist verifySparkDependencyVersions
       - name: Upload test reports
         if: failure()
         uses: actions/upload-artifact@v4
@@ -59,8 +59,36 @@ jobs:
           name: unit-test-reports
           path: "**/build/reports/tests/**"
 
+  spark-compatibility:
+    needs: standalone-smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        spark: ["3.5.0", "3.5.9"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: corretto
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Verify Spark compatibility boundary
+        run: >-
+          ./gradlew --no-daemon test installDist
+          :integration-tests:compileIntegrationTestJava
+          verifySparkDependencyVersions
+          -PsparkVersion=${{ matrix.spark }}
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spark-${{ matrix.spark }}-test-reports
+          path: "**/build/reports/tests/**"
+
   integration:
-    needs: unit
+    needs: [unit, spark-compatibility]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
@@ -80,9 +108,12 @@ jobs:
         if: failure()
         run: |
           mkdir -p /tmp/container-logs
-          docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}' \
+          docker ps -a \
+            --filter 'label=io.github.jiangxt2.gravitino-doris-spark-connector.it=true' \
+            --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}' \
             > /tmp/container-logs/containers.txt
-          for c in $(docker ps -aq); do
+          for c in $(docker ps -aq \
+            --filter 'label=io.github.jiangxt2.gravitino-doris-spark-connector.it=true'); do
             name=$(docker inspect -f '{{.Name}}' "$c" | tr -d '/')
             docker logs "$c" > "/tmp/container-logs/$name.log" 2>&1 || true
           done

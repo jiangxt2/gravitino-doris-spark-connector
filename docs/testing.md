@@ -13,12 +13,30 @@ java -version
 ## Static and unit gates
 
 ```bash
-./gradlew spotlessCheck test installDist
+./gradlew spotlessCheck test installDist verifySparkDependencyVersions
 ```
 
 These tasks cover property protection, credential resolution, explicit authorization ordering,
 schema/type compatibility, cache behavior, hybrid planner state, capability filtering, plugin
-registration, provider loading, and distribution assembly.
+registration, provider loading, distribution assembly, repository container-label configuration,
+and resolved Spark-module version consistency.
+
+## Spark compatibility gates
+
+Spark 3.5.8 is the default compile and test version. The lower and current upper compatibility
+boundaries run in separate Gradle processes:
+
+```bash
+./gradlew test installDist :integration-tests:compileIntegrationTestJava \
+  verifySparkDependencyVersions -PsparkVersion=3.5.0
+./gradlew test installDist :integration-tests:compileIntegrationTestJava \
+  verifySparkDependencyVersions -PsparkVersion=3.5.9
+```
+
+These commands compile the integration-test source set but do not start Docker. They verify API
+linkage, class loading, the packaged connector distribution, and the complete resolved
+`org.apache.spark` module set. They do not certify real Doris behavior on those two boundary
+versions. The full real-infrastructure certification remains pinned to Spark 3.5.8.
 
 ## Real-infrastructure gates
 
@@ -29,7 +47,7 @@ registration, provider loading, and distribution assembly.
 
 Each invocation starts:
 
-- embedded Spark 3.5.3 using the combined plugin;
+- embedded Spark 3.5.8 using the combined plugin;
 - `apache/gravitino:1.3.0` with the built independent provider mounted into its isolated catalog
   directory;
 - official split Doris FE and BE images for the selected version;
@@ -104,4 +122,6 @@ version before treating local results as equivalent to CI.
 
 Gradle XML and HTML reports are under `integration-tests/build/test-results/` and
 `integration-tests/build/reports/tests/`. Container output is attached to the Gradle test log.
-CI uploads reports when a gate fails.
+CI uploads reports when a gate fails. Failure-time Docker inventory and log collection select only
+containers labeled `io.github.jiangxt2.gravitino-doris-spark-connector.it=true`; the integration
+tests verify that Doris FE, Doris BE, and Gravitino carry that label.

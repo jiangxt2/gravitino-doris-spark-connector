@@ -77,4 +77,8 @@ val integrationTest by tasks.registering(Test::class) {
   outputs.upToDateWhen { false }
 }
 
+tasks.test {
+  systemProperty("connector.repository.root", rootProject.projectDir.absolutePath)
+}
+
 tasks.check { dependsOn(tasks.test) }

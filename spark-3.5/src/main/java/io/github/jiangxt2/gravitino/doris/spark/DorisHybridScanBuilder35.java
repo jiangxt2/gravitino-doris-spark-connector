@@ -200,9 +200,8 @@ final class DorisHybridScanBuilder35
 
   @Override
   public boolean pushOffset(int offset) {
-    // Spark 3.5.3's LimitAndOffset rule invokes pushLimit/pushTopN before pushOffset. The pinned
-    // ordering lets this adapter distinguish offset-only queries from an offset that consumes a
-    // previously pushed upper bound.
+    // Spark can invoke pushLimit/pushTopN before pushOffset. Retaining the accepted upper bound
+    // allows this adapter to distinguish offset-only queries from an offset that consumes it.
     // JDBCScanBuilder subtracts OFFSET from its previously pushed LIMIT. If the result is zero or
     // negative, the MySQL dialect emits an unbounded offset-only query. Rejecting the offset keeps
     // it in Spark, where applying it above the bounded scan correctly produces an empty result.

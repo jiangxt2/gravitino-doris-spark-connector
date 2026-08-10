@@ -12,11 +12,16 @@ Central artifacts and does not patch or shadow `org.apache.gravitino` classes.
 | Component | Supported version |
 | --- | --- |
 | Apache Gravitino client/server | 1.3.0 |
-| Apache Spark | 3.5.3 |
+| Apache Spark | 3.5.x; release-certified on 3.5.8 |
 | Scala | 2.12 |
 | Apache Doris Spark Connector | 26.0.0 |
 | Apache Doris | 3.0.6.2 and 4.0.6 |
 | Java | 17 |
+
+Spark 3.5.8 is the default compile and test version and runs the complete Doris 3.0.6.2 and 4.0.6
+integration matrix. Spark 3.5.0 and 3.5.9 run compile, unit, class-loading, integration-test source
+compilation, and distribution compatibility smoke tests. Those boundary smokes do not constitute
+full Doris integration certification for every Spark 3.5 patch.
 
 The initial release supports governed batch reads of Doris tables. Gravitino views, Spark writes,
 streaming writes, and Spark DDL are deliberately rejected. The facade already contains
@@ -139,10 +144,20 @@ type is authoritative for the String/base64 execution representation.
 Use Java 17:
 
 ```bash
-./gradlew spotlessCheck test installDist
+./gradlew spotlessCheck test installDist verifySparkDependencyVersions
 ```
 
-Real-infrastructure tests run embedded Spark plus Docker-managed Gravitino and Doris:
+Compatibility checks for the currently verified Spark 3.5 boundaries run in separate Gradle
+processes without starting Doris:
+
+```bash
+./gradlew test installDist :integration-tests:compileIntegrationTestJava \
+  verifySparkDependencyVersions -PsparkVersion=3.5.0
+./gradlew test installDist :integration-tests:compileIntegrationTestJava \
+  verifySparkDependencyVersions -PsparkVersion=3.5.9
+```
+
+Real-infrastructure tests run embedded Spark 3.5.8 plus Docker-managed Gravitino and Doris:
 
 ```bash
 ./gradlew integrationTest -PdorisVersion=3.0.6.2

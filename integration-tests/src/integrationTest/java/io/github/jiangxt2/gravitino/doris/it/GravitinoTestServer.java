@@ -37,6 +37,7 @@ final class GravitinoTestServer implements AutoCloseable {
   GravitinoTestServer(DockerTestNetwork network, Path providerDirectory) {
     container =
         new GenericContainer<>(DockerImageName.parse("apache/gravitino:1.3.0"))
+            .withLabel(IntegrationTestContainerLabels.KEY, IntegrationTestContainerLabels.VALUE)
             .withNetworkMode(network.name())
             .withFileSystemBind(
                 providerDirectory.toAbsolutePath().toString(),
@@ -55,6 +56,11 @@ final class GravitinoTestServer implements AutoCloseable {
 
   void start() {
     container.start();
+    IntegrationTestContainerLabels.assertProjectLabel(
+        "Gravitino server",
+        container.getContainerInfo().getConfig() == null
+            ? null
+            : container.getContainerInfo().getConfig().getLabels());
   }
 
   String uri() {

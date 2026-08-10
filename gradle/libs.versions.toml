@@ -9,7 +9,7 @@ junit = "5.11.4"
 mockito = "5.14.2"
 mysql = "8.0.33"
 scala = "2.12.18"
-spark = "3.5.3"
+spark = "3.5.8"
 spotless = "6.25.0"
 testcontainers = "1.21.4"
 

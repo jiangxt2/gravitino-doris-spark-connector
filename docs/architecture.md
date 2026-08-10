@@ -33,12 +33,28 @@ The implementation is checked against the concrete source contracts, not only pr
   `GravitinoDriverPlugin`, and the JDBC Doris provider/type converter;
 - Doris Connector 26.0.0 `DorisTableCatalogBase`, `DorisTableBase`, `DorisScanBuilderBase`,
   `V2ExpressionBuilder`, `SchemaConvertors`, `DorisConfig`, and `DorisOptions`;
-- Spark 3.5.3 `JDBCTable`, `JDBCScanBuilder`, `JDBCOptions`, `JdbcDialects`, and V2 pushdown rules;
+- Spark 3.5.8 `JDBCTable`, `JDBCScanBuilder`, `JDBCOptions`, `JdbcDialects`, and V2 pushdown rules,
+  with compile and class-loading compatibility boundaries at 3.5.0 and 3.5.9;
 - Doris 3.0.6.2 and 4.0.6 FE schema, JDBC metadata, DDL, and value behavior in real containers.
 
 This review is why the project composes the published Gravitino plugin, delegates tablet IO to the
 official Doris connector, and delegates SQL generation to Spark JDBC rather than copying any of
 those frameworks.
+
+## Spark compatibility boundary
+
+`DorisCatalogClassResolver` accepts Spark 3.5.x only when the Scala binary version is 2.12. The
+default version catalog pins Spark 3.5.8 for compilation, unit tests, distribution assembly, and
+both real-Doris integration lanes. This is the release-certified combination.
+
+The `sparkVersion` Gradle property exists only for compatibility verification. It accepts numeric
+Spark 3.5 patch versions, applies one version to every `org.apache.spark` module in every
+subproject, and does not change Scala, Gravitino, or Doris Connector dependencies.
+`verifySparkDependencyVersions` resolves the Spark-bearing test classpaths, rejects mixed patch
+versions, and requires Spark core, SQL, and Catalyst to be present so an empty resolution cannot
+pass. CI runs that task with Spark 3.5.0 and 3.5.9 in separate processes and compiles the
+integration-test source set without starting Docker. These boundary smokes are not substitutes for
+the Spark 3.5.8 real-infrastructure matrix.
 
 ## Request flow
 

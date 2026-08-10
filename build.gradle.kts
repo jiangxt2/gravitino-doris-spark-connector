@@ -13,6 +13,7 @@
  */
 
 import com.diffplug.gradle.spotless.SpotlessExtension
+import org.gradle.api.artifacts.component.ModuleComponentIdentifier
 import org.gradle.api.tasks.testing.logging.TestExceptionFormat
 
 plugins {
@@ -21,6 +22,21 @@ plugins {
 }
 
 val dependencyCatalog = libs
+val sparkVersionPattern = Regex("""^3\.5\.\d+$""")
+val expectedSparkVersion =
+    providers.gradleProperty("sparkVersion").orElse(dependencyCatalog.versions.spark)
+
+if (!sparkVersionPattern.matches(expectedSparkVersion.get())) {
+  throw GradleException("sparkVersion must match 3.5.<non-negative numeric patch>")
+}
+
+val sparkRuntimeConfigurations =
+    mapOf(
+        ":spark-common" to "testRuntimeClasspath",
+        ":spark-3.5" to "testRuntimeClasspath",
+        ":integration-tests" to "integrationTestRuntimeClasspath")
+val requiredSparkModules =
+    setOf("spark-core_2.12", "spark-sql_2.12", "spark-catalyst_2.12")
 
 allprojects {
   group = "io.github.jiangxt2.gravitino.doris"
@@ -28,6 +44,15 @@ allprojects {
 }
 
 subprojects {
+  configurations.configureEach {
+    resolutionStrategy.eachDependency {
+      if (requested.group == "org.apache.spark") {
+        useVersion(expectedSparkVersion.get())
+        because("all Spark modules must use the requested Spark 3.5 patch")
+      }
+    }
+  }
+
   if (name != "distribution") {
     apply(plugin = "java-library")
     apply(plugin = "com.diffplug.spotless")
@@ -75,6 +100,55 @@ subprojects {
       options.compilerArgs.addAll(listOf("-Xlint:all", "-Werror"))
     }
   }
+}
+
+val verifySparkDependencyVersions by tasks.registering {
+  group = LifecycleBasePlugin.VERIFICATION_GROUP
+  description = "Verifies that Spark-bearing test classpaths use one expected Spark version."
+  inputs.property("expectedSparkVersion", expectedSparkVersion)
+
+  doLast {
+    val expectedVersion = expectedSparkVersion.get()
+    sparkRuntimeConfigurations.forEach { (projectPath, configurationName) ->
+      val configuration = project(projectPath).configurations.getByName(configurationName)
+      val sparkComponents =
+          configuration.incoming.resolutionResult.allComponents
+              .mapNotNull { component -> component.id as? ModuleComponentIdentifier }
+              .filter { component -> component.group == "org.apache.spark" }
+
+      val resolvedModules = sparkComponents.map { component -> component.module }.toSet()
+      val missingModules = requiredSparkModules - resolvedModules
+      val mismatchedComponents =
+          sparkComponents
+              .filter { component -> component.version != expectedVersion }
+              .map { component -> "${component.module}:${component.version}" }
+              .sorted()
+
+      if (missingModules.isNotEmpty() || mismatchedComponents.isNotEmpty()) {
+        throw GradleException(
+            buildString {
+              append("Spark dependency verification failed for ")
+              append("$projectPath:$configurationName")
+              if (missingModules.isNotEmpty()) {
+                append("; missing modules: ")
+                append(missingModules.sorted().joinToString(", "))
+              }
+              if (mismatchedComponents.isNotEmpty()) {
+                append("; expected version $expectedVersion but resolved: ")
+                append(mismatchedComponents.joinToString(", "))
+              }
+            })
+      }
+
+      logger.lifecycle(
+          "$projectPath:$configurationName resolved ${sparkComponents.size} " +
+              "Spark modules at $expectedVersion")
+    }
+  }
+}
+
+tasks.named(LifecycleBasePlugin.CHECK_TASK_NAME) {
+  dependsOn(verifySparkDependencyVersions)
 }
 
 tasks.register("integrationTest") {

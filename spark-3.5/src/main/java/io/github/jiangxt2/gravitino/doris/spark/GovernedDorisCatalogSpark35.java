@@ -23,7 +23,6 @@ import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
 import org.apache.spark.sql.connector.catalog.Identifier;
 import org.apache.spark.sql.connector.catalog.Table;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
-import org.apache.spark.sql.connector.catalog.TableWritePrivilege;
 import org.apache.spark.sql.types.StructType;
 
 /** Spark 3.5 implementation of the governed, read-only Doris Spark catalog. */
@@ -90,9 +89,15 @@ public class GovernedDorisCatalogSpark35 extends GovernedDorisCatalog {
         getCapabilityPolicy());
   }
 
-  @Override
-  public Table loadTable(Identifier ident, Set<TableWritePrivilege> writePrivileges)
-      throws NoSuchTableException {
+  /**
+   * Rejects Spark's write-aware table loading without linking to patch-specific API types.
+   *
+   * <p>{@code TableWritePrivilege} and the corresponding {@code TableCatalog} overload are absent
+   * from early Spark 3.5 patch releases. The raw {@link Set} keeps the erased method descriptor
+   * used by later patches while allowing this adapter to compile and load across Spark 3.5.x.
+   */
+  @SuppressWarnings("rawtypes")
+  public Table loadTable(Identifier ident, Set writePrivileges) throws NoSuchTableException {
     if (!getCapabilityPolicy().allowsTableWrites()) {
       throw getCapabilityPolicy().reject("table writes");
     }

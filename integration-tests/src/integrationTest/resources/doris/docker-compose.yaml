@@ -25,6 +25,8 @@ services:
   doris-fe:
     image: ${GOVERNED_DORIS_FE_IMAGE}
     hostname: doris-fe
+    labels:
+      io.github.jiangxt2.gravitino-doris-spark-connector.it: "true"
     entrypoint: ["bash"]
     environment:
       # Ubuntu 24.04 runners use a cgroup v2 controller layout that JDK 17
@@ -47,6 +49,8 @@ services:
 
   doris-be:
     image: ${GOVERNED_DORIS_BE_IMAGE}
+    labels:
+      io.github.jiangxt2.gravitino-doris-spark-connector.it: "true"
     entrypoint: ["bash"]
     ports:
       - "8040"

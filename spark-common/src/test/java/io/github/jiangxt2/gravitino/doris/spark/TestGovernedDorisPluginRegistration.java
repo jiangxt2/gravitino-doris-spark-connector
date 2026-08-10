@@ -105,13 +105,20 @@ public class TestGovernedDorisPluginRegistration {
   }
 
   @Test
-  void rejectsUnsupportedSparkOrScalaWithoutJdbcFallback() {
-    assertThat(DorisCatalogClassResolver.resolve("3.5.3", "2.12.18"))
+  void acceptsSupportedSparkPatchesAndRejectsUnsupportedRuntimeWithoutJdbcFallback() {
+    assertThat(DorisCatalogClassResolver.resolve("3.5.0", "2.12.18"))
+        .isEqualTo(DorisCatalogClassResolver.SPARK_35_CATALOG_CLASS);
+    assertThat(DorisCatalogClassResolver.resolve("3.5.8", "2.12.18"))
+        .isEqualTo(DorisCatalogClassResolver.SPARK_35_CATALOG_CLASS);
+    assertThat(DorisCatalogClassResolver.resolve("3.5.9", "2.12.18"))
         .isEqualTo(DorisCatalogClassResolver.SPARK_35_CATALOG_CLASS);
     assertThatThrownBy(() -> DorisCatalogClassResolver.resolve("3.4.4", "2.12.18"))
         .isInstanceOf(IllegalStateException.class)
         .hasMessageContaining("Spark 3.5");
-    assertThatThrownBy(() -> DorisCatalogClassResolver.resolve("3.5.3", "2.13.14"))
+    assertThatThrownBy(() -> DorisCatalogClassResolver.resolve("4.0.0", "2.12.18"))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("Spark 3.5");
+    assertThatThrownBy(() -> DorisCatalogClassResolver.resolve("3.5.8", "2.13.14"))
         .isInstanceOf(IllegalStateException.class)
         .hasMessageContaining("Scala 2.12");
   }

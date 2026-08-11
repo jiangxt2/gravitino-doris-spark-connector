@@ -35,7 +35,7 @@ junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
 junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }
 junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }
 mockito-core = { module = "org.mockito:mockito-core", version.ref = "mockito" }
-mysql-driver = { module = "mysql:mysql-connector-java", version.ref = "mysql" }
+mysql-driver = { module = "com.mysql:mysql-connector-j", version.ref = "mysql" }
 scala-library = { module = "org.scala-lang:scala-library", version.ref = "scala" }
 spark-catalyst = { module = "org.apache.spark:spark-catalyst_2.12", version.ref = "spark" }
 spark-core = { module = "org.apache.spark:spark-core_2.12", version.ref = "spark" }

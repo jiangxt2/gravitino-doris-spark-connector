@@ -148,7 +148,7 @@ val verifySparkDependencyVersions by tasks.registering {
 }
 
 tasks.named(LifecycleBasePlugin.CHECK_TASK_NAME) {
-  dependsOn(verifySparkDependencyVersions)
+  dependsOn(verifySparkDependencyVersions, ":distribution:verifyDistributionDependencyContract")
 }
 
 tasks.register("integrationTest") {

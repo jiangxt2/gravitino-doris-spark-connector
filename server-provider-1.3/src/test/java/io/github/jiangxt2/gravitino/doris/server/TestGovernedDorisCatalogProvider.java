@@ -59,15 +59,26 @@ public class TestGovernedDorisCatalogProvider {
   @Test
   void validatesRawCatalogConfigurationBeforeJdbcInitialization() {
     GovernedDorisCatalogProvider provider = new GovernedDorisCatalogProvider();
-    Map<String, String> safe = validProperties();
-    assertThat(provider.withCatalogConf(safe)).isSameAs(provider);
-
     Map<String, String> unsafe = validProperties();
     unsafe.put("gravitino.bypass.connectionFactoryClassName", "example.SecretCanary");
     assertThatThrownBy(() -> provider.withCatalogConf(unsafe))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("connectionFactoryClassName")
         .hasMessageNotContaining("SecretCanary");
+  }
+
+  @Test
+  void validCatalogRequiresAnExternalDriverWithoutEchoingConfiguration() {
+    // The unit runtime deliberately excludes Connector/J. The driver-present provider path is
+    // covered by GovernedDorisConnectorIT with an externally mounted test Driver.
+    GovernedDorisCatalogProvider provider = new GovernedDorisCatalogProvider();
+
+    assertThatThrownBy(() -> provider.withCatalogConf(validProperties()))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("com.mysql:mysql-connector-j:8.0.33")
+        .hasMessageContaining("$GRAVITINO_HOME/catalogs/doris-governed/libs")
+        .hasMessageNotContaining("provider-secret-canary")
+        .hasMessageNotContaining("jdbc:mysql://fe:9030/");
   }
 
   @Test

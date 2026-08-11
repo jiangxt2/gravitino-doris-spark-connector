@@ -44,6 +44,10 @@ import org.slf4j.LoggerFactory;
 public abstract class GovernedDorisCatalog extends GravitinoJdbcCatalog {
 
   private static final Logger LOG = LoggerFactory.getLogger(GovernedDorisCatalog.class);
+  private static final String MYSQL_DRIVER_CLASS = "com.mysql.cj.jdbc.Driver";
+  private static final String MISSING_MYSQL_DRIVER_MESSAGE =
+      "MySQL Connector/J (tested with com.mysql:mysql-connector-j:8.0.33) is required on the "
+          + "Spark driver and every executor classpath; distribute it with --jars or spark.jars";
 
   /** The official Connector artifact required on Spark driver and executor classpaths. */
   private DorisJdbcConnectionInfo jdbcConnectionInfo;
@@ -146,6 +150,7 @@ public abstract class GovernedDorisCatalog extends GravitinoJdbcCatalog {
     DorisJdbcSecurity.validateConnection(
         properties.get(DorisConnectorConstants.JDBC_URL),
         properties.get(DorisConnectorConstants.JDBC_DRIVER));
+    requireMysqlDriver();
 
     TableCatalog dorisCatalog;
     try {
@@ -384,5 +389,26 @@ public abstract class GovernedDorisCatalog extends GravitinoJdbcCatalog {
                 + "classpaths for Spark 3.5 and Scala 2.12",
             DorisConnectorConstants.DORIS_CONNECTOR_COORDINATES),
         cause);
+  }
+
+  private static void requireMysqlDriver() {
+    ClassLoader contextClassLoader = Thread.currentThread().getContextClassLoader();
+    ClassLoader adapterClassLoader = GovernedDorisCatalog.class.getClassLoader();
+    try {
+      Class.forName(
+          MYSQL_DRIVER_CLASS,
+          false,
+          contextClassLoader == null ? adapterClassLoader : contextClassLoader);
+    } catch (ClassNotFoundException | LinkageError | SecurityException firstFailure) {
+      if (contextClassLoader != null && contextClassLoader != adapterClassLoader) {
+        try {
+          Class.forName(MYSQL_DRIVER_CLASS, false, adapterClassLoader);
+          return;
+        } catch (ClassNotFoundException | LinkageError | SecurityException ignored) {
+          firstFailure.addSuppressed(ignored);
+        }
+      }
+      throw new IllegalStateException(MISSING_MYSQL_DRIVER_MESSAGE, firstFailure);
+    }
   }
 }

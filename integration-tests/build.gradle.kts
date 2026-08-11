@@ -12,7 +12,15 @@
  * limitations under the License.
  */
 
+import java.nio.file.Files
+
 description = "Standalone Gravitino, Spark, and Doris integration tests"
+
+val externalTestJdbcDriver by configurations.creating {
+  isCanBeConsumed = false
+  isCanBeResolved = true
+  description = "Test-only MySQL Connector/J mounted outside the production distribution."
+}
 
 sourceSets {
   create("integrationTest") {
@@ -29,6 +37,7 @@ configurations {
 }
 
 dependencies {
+  externalTestJdbcDriver(libs.mysql.driver) { isTransitive = false }
   testImplementation(project(":spark-3.5"))
   testImplementation(project(":server-provider-1.3"))
   testImplementation(libs.gravitino.spark.runtime35)
@@ -64,20 +73,43 @@ val integrationTest by tasks.registering(Test::class) {
       "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED",
       "--add-opens=java.base/sun.util.calendar=ALL-UNNAMED")
   doFirst {
-    systemProperty(
-        "connector.provider.directory",
+    val providerDirectory =
         project(":distribution")
             .layout
             .buildDirectory
             .dir("install/gravitino-doris-spark-connector/gravitino/catalogs/doris-governed")
             .get()
             .asFile
-            .absolutePath)
+            .canonicalFile
+    val jdbcDriver = externalTestJdbcDriver.singleFile.canonicalFile
+    if (jdbcDriver.toPath().startsWith(providerDirectory.toPath())) {
+      throw GradleException("The test JDBC driver must remain outside the production distribution")
+    }
+    val temporaryRoot =
+        Files.createDirectories(layout.buildDirectory.dir("tmp").get().asFile.toPath())
+    val emptyExternalDriverDirectory =
+        Files.createTempDirectory(temporaryRoot, "external-jdbc-driver-").toFile().canonicalFile
+    val installedExternalDriverDirectory =
+        Files.createTempDirectory(temporaryRoot, "installed-jdbc-driver-").toFile().canonicalFile
+    // Gravitino 1.3.0 links only mysql-connector-java-*.jar from /opt/gravitino/jdbc-drivers.
+    Files.copy(
+        jdbcDriver.toPath(),
+        installedExternalDriverDirectory.toPath().resolve("mysql-connector-java-8.0.33.jar"))
+    systemProperty("connector.provider.directory", providerDirectory.absolutePath)
+    systemProperty("connector.mysql.driver.path", jdbcDriver.absolutePath)
+    systemProperty(
+        "connector.empty.jdbc.driver.directory", emptyExternalDriverDirectory.absolutePath)
+    systemProperty(
+        "connector.installed.jdbc.driver.directory",
+        installedExternalDriverDirectory.absolutePath)
   }
   outputs.upToDateWhen { false }
 }
 
 tasks.test {
+  inputs
+      .file(rootProject.file(".github/workflows/build.yml"))
+      .withPathSensitivity(PathSensitivity.RELATIVE)
   systemProperty("connector.repository.root", rootProject.projectDir.absolutePath)
 }
 

@@ -14,6 +14,7 @@
 
 package io.github.jiangxt2.gravitino.doris.it;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import org.slf4j.Logger;
@@ -31,17 +32,27 @@ final class GravitinoTestServer implements AutoCloseable {
 
   private static final Logger LOG = LoggerFactory.getLogger(GravitinoTestServer.class);
   private static final int HTTP_PORT = 8090;
+  private static final String CATALOG_DIRECTORY = "/opt/gravitino/catalogs/doris-governed";
+  private static final String JDBC_DRIVER_DIRECTORY = "/opt/gravitino/jdbc-drivers";
 
   private final GenericContainer<?> container;
 
-  GravitinoTestServer(DockerTestNetwork network, Path providerDirectory) {
+  GravitinoTestServer(
+      DockerTestNetwork network, Path providerDirectory, Path externalDriverDirectory) {
+    if (!Files.isDirectory(externalDriverDirectory)) {
+      throw new IllegalArgumentException("The external JDBC driver directory must exist");
+    }
     container =
         new GenericContainer<>(DockerImageName.parse("apache/gravitino:1.3.0"))
             .withLabel(IntegrationTestContainerLabels.KEY, IntegrationTestContainerLabels.VALUE)
             .withNetworkMode(network.name())
             .withFileSystemBind(
                 providerDirectory.toAbsolutePath().toString(),
-                "/opt/gravitino/catalogs/doris-governed",
+                CATALOG_DIRECTORY,
+                BindMode.READ_ONLY)
+            .withFileSystemBind(
+                externalDriverDirectory.toAbsolutePath().toString(),
+                JDBC_DRIVER_DIRECTORY,
                 BindMode.READ_ONLY)
             .withEnv("GRAVITINO_AUTHORIZATION_ENABLE", "true")
             .withEnv("GRAVITINO_AUTHORIZATION_SERVICE_ADMINS", ADMIN_USER)

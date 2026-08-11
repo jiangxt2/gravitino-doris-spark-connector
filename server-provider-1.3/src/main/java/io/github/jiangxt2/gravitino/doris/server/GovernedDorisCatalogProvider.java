@@ -23,6 +23,11 @@ import org.apache.gravitino.connector.PropertiesMetadata;
 /** Gravitino 1.3 catalog provider dedicated to governed Doris Spark reads. */
 public final class GovernedDorisCatalogProvider extends DorisCatalog {
 
+  private static final String MYSQL_DRIVER_CLASS = "com.mysql.cj.jdbc.Driver";
+  private static final String MISSING_DRIVER_MESSAGE =
+      "MySQL Connector/J (tested with com.mysql:mysql-connector-j:8.0.33) is not available to "
+          + "the Gravitino Server catalog; install it in "
+          + "$GRAVITINO_HOME/catalogs/doris-governed/libs before starting Gravitino";
   private static final GovernedDorisCatalogPropertiesMetadata CATALOG_PROPERTIES =
       new GovernedDorisCatalogPropertiesMetadata();
 
@@ -34,6 +39,7 @@ public final class GovernedDorisCatalogProvider extends DorisCatalog {
   @Override
   public GovernedDorisCatalogProvider withCatalogConf(Map<String, String> conf) {
     DorisJdbcSecurity.validateServerCatalogProperties(conf);
+    requireMysqlDriver();
     super.withCatalogConf(conf);
     return this;
   }
@@ -46,5 +52,14 @@ public final class GovernedDorisCatalogProvider extends DorisCatalog {
   @Override
   public PropertiesMetadata catalogPropertiesMetadata() {
     return CATALOG_PROPERTIES;
+  }
+
+  private static void requireMysqlDriver() {
+    ClassLoader providerClassLoader = GovernedDorisCatalogProvider.class.getClassLoader();
+    try {
+      Class.forName(MYSQL_DRIVER_CLASS, false, providerClassLoader);
+    } catch (ClassNotFoundException | LinkageError | SecurityException e) {
+      throw new IllegalStateException(MISSING_DRIVER_MESSAGE, e);
+    }
   }
 }

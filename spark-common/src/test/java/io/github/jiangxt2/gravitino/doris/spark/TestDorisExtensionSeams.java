@@ -59,7 +59,8 @@ public class TestDorisExtensionSeams {
     Table futureWriteDelegate = mock(Table.class);
     StructType schema = new StructType();
     DorisJdbcConnectionInfo connectionInfo =
-        new DorisJdbcConnectionInfo("jdbc:mysql://fe:9030/db", "driver", "user", "secret");
+        new DorisJdbcConnectionInfo(
+            "jdbc:mysql://fe:9030/db", "com.mysql.cj.jdbc.Driver", "user", "secret");
     DorisJdbcReadOptions readOptions = DorisJdbcReadOptions.from(Map.of());
     DorisAuthorizedTableContext context =
         new DorisAuthorizedTableContext(

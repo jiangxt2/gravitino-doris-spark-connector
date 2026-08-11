@@ -14,6 +14,7 @@
 
 package io.github.jiangxt2.gravitino.doris.spark;
 
+import io.github.jiangxt2.gravitino.doris.security.DorisJdbcSecurity;
 import java.util.Map;
 import java.util.Set;
 import org.apache.gravitino.NameIdentifier;
@@ -142,6 +143,10 @@ public abstract class GovernedDorisCatalog extends GravitinoJdbcCatalog {
   @Override
   protected TableCatalog createAndInitSparkCatalog(
       String name, CaseInsensitiveStringMap options, Map<String, String> properties) {
+    DorisJdbcSecurity.validateConnection(
+        properties.get(DorisConnectorConstants.JDBC_URL),
+        properties.get(DorisConnectorConstants.JDBC_DRIVER));
+
     TableCatalog dorisCatalog;
     try {
       dorisCatalog = createDorisTableCatalog();

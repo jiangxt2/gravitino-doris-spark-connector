@@ -14,6 +14,8 @@
 
 package io.github.jiangxt2.gravitino.doris.spark;
 
+import io.github.jiangxt2.gravitino.doris.security.DorisJdbcSecurity;
+
 /** Immutable JDBC connection material used by the Doris SQL execution lane. */
 public final class DorisJdbcConnectionInfo {
 
@@ -31,8 +33,9 @@ public final class DorisJdbcConnectionInfo {
    * @param password the vended JDBC password
    */
   public DorisJdbcConnectionInfo(String url, String driver, String user, String password) {
-    this.url = requireNonBlank("jdbc-url", url);
-    this.driver = requireNonBlank("jdbc-driver", driver);
+    DorisJdbcSecurity.validateConnection(url, driver);
+    this.url = url;
+    this.driver = driver;
     this.user = requireNonBlank("JDBC user", user);
     this.password = requireNonNull("JDBC password", password);
   }

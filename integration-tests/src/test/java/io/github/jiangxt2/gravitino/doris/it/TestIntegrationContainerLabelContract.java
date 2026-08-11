@@ -43,6 +43,23 @@ public class TestIntegrationContainerLabelContract {
         compose.lines().filter(line -> line.trim().equals(composeLabel)).count();
     assertThat(composeLabelCount).isEqualTo(2);
 
+    String tcpProxy =
+        Files.readString(
+            root.resolve(
+                "integration-tests/src/integrationTest/java/io/github/jiangxt2/gravitino/doris/it/RecordingDorisTcpProxy.java"));
+    assertThat(tcpProxy)
+        .contains(
+            ".withLabel(IntegrationTestContainerLabels.KEY, IntegrationTestContainerLabels.VALUE)")
+        .contains(
+            "apache/gravitino:1.3.0@sha256:4ff340f1160600ecac8126c2a0c4b88ea2178d3f1954966af559bab526485af6");
+
+    String tcpProxyServer =
+        Files.readString(
+            root.resolve(
+                "integration-tests/src/integrationTest/java/io/github/jiangxt2/gravitino/doris/it/RecordingDorisTcpProxyServer.java"));
+    assertThat(tcpProxyServer)
+        .doesNotContain("System.out", "System.err", "ByteArrayOutputStream", "LoggerFactory");
+
     String workflow = Files.readString(root.resolve(".github/workflows/build.yml"));
     int collectionStepStart = workflow.indexOf("- name: Collect container logs");
     int collectionStepEnd = workflow.indexOf("- name: Upload integration reports");

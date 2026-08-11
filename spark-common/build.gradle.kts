@@ -15,6 +15,8 @@
 description = "Version-neutral Gravitino governance facade for Doris Spark reads"
 
 dependencies {
+  implementation(project(":jdbc-security"))
+
   compileOnlyApi(libs.gravitino.api)
   compileOnly(libs.gravitino.spark.common)
   compileOnly(libs.gravitino.client)

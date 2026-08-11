@@ -24,6 +24,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.google.common.collect.ImmutableMap;
+import java.util.Map;
 import java.util.Set;
 import org.apache.gravitino.Catalog;
 import org.apache.gravitino.NameIdentifier;
@@ -113,6 +114,22 @@ public class TestGovernedDorisAuthorization {
   }
 
   @Test
+  void invalidJdbcMetadataFailsBeforePhysicalCatalogConstruction() {
+    SecurityOrderingCatalog securityCatalog = new SecurityOrderingCatalog();
+    Map<String, String> properties =
+        Map.of(
+            DorisConnectorConstants.JDBC_URL,
+            "jdbc:mysql://user:secret-canary@fe:9030/",
+            DorisConnectorConstants.JDBC_DRIVER,
+            "com.mysql.cj.jdbc.Driver");
+
+    assertThatThrownBy(() -> securityCatalog.createPhysicalCatalog(properties))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageNotContaining("secret-canary");
+    assertThat(securityCatalog.physicalCatalogCreations).isZero();
+  }
+
+  @Test
   void physicalTableCreationFailureIsSanitizedAfterAuthorization() throws Exception {
     Identifier identifier = Identifier.of(new String[] {"analytics"}, "events");
     org.apache.gravitino.rel.Table logical = mock(org.apache.gravitino.rel.Table.class);
@@ -194,6 +211,37 @@ public class TestGovernedDorisAuthorization {
         DorisJdbcConnectionInfo connectionInfo,
         DorisJdbcReadOptions readOptions) {
       throw new AssertionError("Not used by this authorization unit test");
+    }
+  }
+
+  private static final class SecurityOrderingCatalog extends GovernedDorisCatalog {
+
+    private int physicalCatalogCreations;
+
+    private TableCatalog createPhysicalCatalog(Map<String, String> properties) {
+      return super.createAndInitSparkCatalog(
+          "doris", new CaseInsensitiveStringMap(Map.of()), properties);
+    }
+
+    @Override
+    protected TableCatalog createDorisTableCatalog() {
+      physicalCatalogCreations++;
+      throw new AssertionError("Unsafe JDBC metadata reached physical catalog construction");
+    }
+
+    @Override
+    protected SparkTypeConverter getSparkTypeConverter() {
+      throw new AssertionError("Unsafe JDBC metadata reached Spark type conversion");
+    }
+
+    @Override
+    protected Table createSchemaSeededDorisTable(
+        TableCatalog sparkCatalog,
+        Identifier identifier,
+        DorisReadSchema readSchema,
+        DorisJdbcConnectionInfo connectionInfo,
+        DorisJdbcReadOptions readOptions) {
+      throw new AssertionError("Unsafe JDBC metadata reached reader construction");
     }
   }
 }

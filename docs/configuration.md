@@ -5,7 +5,7 @@
 | Property | Required | Purpose |
 | --- | --- | --- |
 | `jdbc-url` | yes | Doris FE MySQL protocol URL used by Gravitino metadata and the SQL lane |
-| `jdbc-driver` | yes | MySQL JDBC driver class, normally `com.mysql.cj.jdbc.Driver` |
+| `jdbc-driver` | yes | Must be exactly `com.mysql.cj.jdbc.Driver` |
 | `jdbc-user` | yes | Hidden technical-user property used by credential vending |
 | `jdbc-password` | yes | Hidden technical-user password; an empty Doris password is valid |
 | `doris-fenodes` | yes | Comma-separated `host:httpPort` FE endpoints |
@@ -19,6 +19,48 @@ The single `jdbc-url` is used by both the Gravitino server metadata plane and th
 Its host and port must therefore be routable from the Gravitino server, Spark driver, and Spark
 executors. Use a service address shared by those network domains rather than a process-local
 `localhost` address.
+
+## JDBC connection allow-list
+
+The same shared validator runs before Gravitino initializes its JDBC provider and again before
+Spark creates a physical Doris catalog or resolves credentials. It accepts only:
+
+- the exact `com.mysql.cj.jdbc.Driver` class;
+- ordinary `jdbc:mysql://` URLs with one DNS/IPv4 host or bracketed hexadecimal IPv6 host without
+  a zone identifier or dotted-quad tail;
+- one explicit port in the range `1..65535`;
+- an empty database or one database path;
+- structurally complete, non-duplicate `key=value` query parameters.
+
+It rejects load-balance, replication, DNS SRV, multi-host, host sublist and host-property forms,
+URL user-info, query credentials, fragments, malformed percent encoding, and values that do not
+converge after bounded recursive decoding. JDBC credentials must come only from Gravitino's hidden
+`jdbc-user`/`jdbc-password` properties and credential vending.
+
+The following Connector/J parameter names are rejected case-insensitively wherever the driver
+could receive them: `maxAllowedPacket`, `autoDeserialize`, `queryInterceptors`,
+`statementInterceptors`, `detectCustomCollations`, `allowLoadLocalInfile`,
+`allowUrlInLocalInfile`, and `allowLoadLocalInfileInPath`.
+
+Raw and `gravitino.bypass.*` configuration also reject DBCP class-loading properties
+`connectionFactoryClassName`, `evictionPolicyClassName`, and `driverClassName`; identity overrides
+`url`, `username`, and `password`; eager `initialSize`; SQL-bearing `connectionInitSqls` and
+`validationQuery`; and exposure properties `accessToUnderlyingConnectionAllowed`, `jmxName`, and
+`registerConnectionMBean`. Canonical `jdbc-url`, `jdbc-driver`, `jdbc-user`, and `jdbc-password`
+must not be supplied through `gravitino.bypass.*`.
+
+A `connectionProperties` value is parsed once with the same semicolon/newline and Java
+`Properties.load` rules used by DBCP before its effective names are validated. A nested
+`connectionProperties` name and unparseable input fail closed. Errors name only a fixed rule or
+known denied parameter and do not echo the URL, host, credential, or property value.
+
+## Transport limitation
+
+The current release does not enforce or certify TLS for either the Gravitino metadata connection or
+Spark's SQL/native execution lanes. The URL parser permits structurally valid safe query properties
+so a future verified transport profile can be added, but current TLS-looking options are not a
+supported strict-TLS contract. Do not claim confidentiality, server-identity verification, or
+downgrade protection from this release.
 
 ## SQL-lane performance properties
 

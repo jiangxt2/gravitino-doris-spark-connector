@@ -15,6 +15,8 @@
 description = "Gravitino 1.3 provider for the independent governed Doris catalog"
 
 dependencies {
+  implementation(project(":jdbc-security"))
+
   compileOnly(libs.gravitino.api)
   compileOnly(libs.gravitino.common)
   compileOnly(libs.gravitino.core)

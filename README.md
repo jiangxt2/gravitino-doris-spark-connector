@@ -35,7 +35,9 @@ The generic Spark JDBC path can read many Doris scalar tables, but it does not p
 Connector's tablet reader and it inherits JDBC metadata limitations for Doris-specific types. This
 connector adds:
 
-- a `SELECT_TABLE` authorization check before any Doris request;
+- a `SELECT_TABLE` authorization check before native table loading or JDBC table materialization;
+- fail-closed JDBC URL, driver, Connector/J parameter, and DBCP configuration validation on both
+  the Gravitino server and Spark sides;
 - vended JDBC credentials applied after all user-controlled options;
 - native, parallel Doris tablet reads for lossless detail scans;
 - aggregate, Top-N, limit, and offset pushdown through Spark's own JDBC V2 planner;
@@ -99,6 +101,24 @@ from the Gravitino server, Spark driver, and executors.
 `jdbc-user` and `jdbc-password` are hidden Gravitino properties. Do not place them in Spark catalog
 options or `spark.bypass.*`. The Spark adapter accepts credentials only from Gravitino credential
 vending.
+
+## JDBC security boundary
+
+The driver must be exactly `com.mysql.cj.jdbc.Driver`. The URL must use ordinary, single-host
+`jdbc:mysql://host:port` syntax with an explicit port and at most one database path. Multi-host,
+load-balance, replication, DNS SRV, host-property, embedded-credential, malformed, and
+non-converging encoded forms fail closed. Known dangerous Connector/J parameters and DBCP
+class-loading, identity-override, and eager-initialization properties are rejected in URL queries,
+raw catalog keys, `gravitino.bypass.*`, and parsed `connectionProperties`.
+
+Authorization-denial integration tests use fresh Spark catalog managers and directly observe both
+FE HTTP requests and MySQL/JDBC TCP connections remaining at zero. They do not packet-capture Doris
+BE/native ports; the absence of later BE work follows from the tested ordering and the fact that no
+physical table is loaded and no table delegate, scan, or reader is constructed.
+
+This release does not provide or certify strict TLS. Structurally valid Connector/J query
+properties are accepted so a later transport profile can enforce verified TLS, but adding TLS-like
+parameters to the current catalog does not create a supported secure-transport mode.
 
 ## Start Spark
 

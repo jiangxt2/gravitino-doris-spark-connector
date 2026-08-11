@@ -12,24 +12,4 @@
  * limitations under the License.
  */
 
-pluginManagement {
-  repositories {
-    gradlePluginPortal()
-    mavenCentral()
-  }
-}
-
-dependencyResolutionManagement {
-  repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-  repositories { mavenCentral() }
-}
-
-rootProject.name = "gravitino-doris-spark-connector"
-
-include(
-    "jdbc-security",
-    "spark-common",
-    "spark-3.5",
-    "server-provider-1.3",
-    "integration-tests",
-    "distribution")
+description = "Shared Doris JDBC configuration security validation"

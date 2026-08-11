@@ -14,6 +14,8 @@
 
 package io.github.jiangxt2.gravitino.doris.server;
 
+import io.github.jiangxt2.gravitino.doris.security.DorisJdbcSecurity;
+import java.util.Map;
 import org.apache.gravitino.catalog.doris.DorisCatalog;
 import org.apache.gravitino.catalog.jdbc.converter.JdbcTypeConverter;
 import org.apache.gravitino.connector.PropertiesMetadata;
@@ -27,6 +29,13 @@ public final class GovernedDorisCatalogProvider extends DorisCatalog {
   @Override
   public String shortName() {
     return "doris-governed";
+  }
+
+  @Override
+  public GovernedDorisCatalogProvider withCatalogConf(Map<String, String> conf) {
+    DorisJdbcSecurity.validateServerCatalogProperties(conf);
+    super.withCatalogConf(conf);
+    return this;
   }
 
   @Override

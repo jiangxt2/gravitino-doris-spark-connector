@@ -63,9 +63,11 @@ Spark SQL
   -> GovernedDorisSparkPlugin
      -> official GravitinoSparkPlugin
      -> register provider=doris-governed
+  -> GovernedDorisCatalogSpark35.initialize
+     -> shared JDBC URL/driver validation
+     -> physical catalog construction and credential vending
   -> GovernedDorisCatalogSpark35.loadTable
      -> Gravitino TableCatalog.loadTable(identifier, SELECT_TABLE)
-     -> credential vending
      -> FE physical schema snapshot and compatibility validation
      -> GovernedDorisTable
         -> native lane: official Doris tablet scan
@@ -73,8 +75,32 @@ Spark SQL
 ```
 
 An authorization exception exits before native catalog `loadTable`, FE HTTP, scan construction, or
-JDBC connection creation. Integration tests observe this boundary through a proxy that records only
-HTTP method and path.
+JDBC connection creation. Integration tests observe FE HTTP method/path counts and MySQL/JDBC TCP
+accept/active counts without retaining payloads. They do not directly observe BE/native sockets;
+the no-BE-work conclusion is derived from the authorization ordering plus unit tests proving that
+physical-catalog `loadTable`, schema loaders, scan builders, and readers were not entered. Spark
+catalog resolution does initialize the catalog object before a direct table-load call; it does not
+invalidate the table-level ordering or observed zero-I/O result.
+
+## JDBC configuration boundary
+
+`jdbc-security` is a dependency-free shared production module used by both the Gravitino provider
+and Spark adapter. The provider validates raw catalog properties in `withCatalogConf` before its
+parent lifecycle can create DBCP state. Spark validates the canonical URL and driver before
+creating the official Doris catalog or vending credentials, and `DorisJdbcConnectionInfo` repeats
+the same check when SQL-lane connection material is formed.
+
+The contract is deliberately narrower than Connector/J's complete URL grammar: exact current
+driver class, one ordinary host and explicit port, optional single database, and structured query
+parameters. It rejects embedded credentials, complex host forms, known dangerous Connector/J
+names, DBCP class-loading/identity/eager-init/SQL-execution/exposure keys, encoded key variants, and
+smuggling through `connectionProperties`. The DBCP string is parsed once, matching its runtime
+consumption; nested `connectionProperties` is rejected instead of recursively reinterpreted.
+Failures use fixed messages and never include raw connection material.
+
+This boundary is configuration hardening, not transport certification. Strict TLS and endpoint
+identity/coherence remain separate work; the current native and SQL lanes must not be described as
+verified-TLS paths.
 
 ## Hybrid scan selection
 
@@ -162,3 +188,5 @@ credential resolution.
 | JDBC performance parity | Spark `JDBCTable`, standard partition tuple, fetch size | four-partition direct-JDBC parity IT |
 | No readable type rejects the table | read-schema normalization | type-matrix unit tests and both Doris-version IT lanes |
 | No architecture rewrite for future writes | centralized policy and delegates | capability and explicit-rejection tests |
+| JDBC configuration fails closed before I/O | shared `jdbc-security` module on server and Spark | exhaustive parser tests and malicious-catalog IT |
+| Authorization denial avoids observed Doris entry points | fresh catalog managers plus HTTP/TCP recorders | direct and SQL denial IT on both Doris versions |

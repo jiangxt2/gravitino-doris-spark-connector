@@ -16,9 +16,11 @@ package io.github.jiangxt2.gravitino.doris.it;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.testcontainers.shaded.org.awaitility.Awaitility.await;
 
 import com.google.common.collect.ImmutableList;
 import io.github.jiangxt2.gravitino.doris.spark.GovernedDorisSparkPlugin;
+import java.lang.reflect.Field;
 import java.math.BigDecimal;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -28,6 +30,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.Statement;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
@@ -72,6 +75,9 @@ public class GovernedDorisConnectorIT {
   private static final String METALAKE = "doris_it";
   private static final String CATALOG = "governed_doris";
   private static final String PARTITIONED_CATALOG = "governed_doris_partitioned";
+  private static final String RECORDER_CONTROL_CATALOG = "governed_doris_recorder_control";
+  private static final String DIRECT_DENIAL_CATALOG = "governed_doris_direct_denial";
+  private static final String SQL_DENIAL_CATALOG = "governed_doris_sql_denial";
   private static final String JDBC_BASELINE_CATALOG = "direct_doris_jdbc";
   private static final String PROVIDER = "doris-governed";
   private static final String SCHEMA = "connector_it";
@@ -91,8 +97,10 @@ public class GovernedDorisConnectorIT {
   private DockerTestNetwork network;
   private DorisTestCluster doris;
   private RecordingDorisHttpProxy feProxy;
+  private RecordingDorisTcpProxy tcpProxy;
   private GravitinoTestServer gravitino;
   private GravitinoAdminClient adminClient;
+  private GravitinoMetalake metalake;
   private GravitinoClient governedClient;
   private SparkSession spark;
 
@@ -110,12 +118,15 @@ public class GovernedDorisConnectorIT {
       doris = new DorisTestCluster(network, version, repositoryRoot);
       doris.start();
       feProxy = RecordingDorisHttpProxy.start(doris.hostFeEndpoint());
+      tcpProxy = new RecordingDorisTcpProxy(network);
+      tcpProxy.start();
       createPhysicalTables();
 
       gravitino = new GravitinoTestServer(network, providerDirectory);
       gravitino.start();
       createGovernedMetadata();
       startSpark();
+      verifyRecorderControls();
     } catch (Exception | Error e) {
       closeInfrastructure();
       throw e;
@@ -133,6 +144,7 @@ public class GovernedDorisConnectorIT {
     closeQuietly(governedClient);
     closeQuietly(adminClient);
     closeQuietly(gravitino);
+    closeQuietly(tcpProxy);
     closeQuietly(feProxy);
     closeQuietly(doris);
     closeQuietly(network);
@@ -479,22 +491,136 @@ public class GovernedDorisConnectorIT {
   }
 
   @Test
-  void deniesSelectBeforeAnyDorisRequest() {
-    org.apache.spark.sql.connector.catalog.TableCatalog sparkCatalog = sparkCatalog(CATALOG);
-    feProxy.reset();
-    assertThatThrownBy(
-            () -> sparkCatalog.loadTable(Identifier.of(new String[] {SCHEMA}, DENIED_TABLE)))
-        .isInstanceOf(ForbiddenException.class)
-        .hasMessageContaining("not authorized")
-        .hasMessageContaining("loadTable");
-    assertThat(feProxy.totalRequestCount()).isZero();
+  void deniesDirectTableLoadBeforeAnyObservedDorisIo() {
+    SparkSession deniedSession = spark.newSession();
+    CatalogManager manager = deniedSession.sessionState().catalogManager();
+    assertThat(manager).isNotSameAs(spark.sessionState().catalogManager());
+    assertThat(isCatalogResolved(manager, DIRECT_DENIAL_CATALOG)).isFalse();
 
+    RecordingDorisTcpProxy.State reset = resetDeniedIoRecorders();
+    try {
+      org.apache.spark.sql.connector.catalog.TableCatalog deniedCatalog =
+          sparkCatalog(deniedSession, DIRECT_DENIAL_CATALOG);
+      assertThat(isCatalogResolved(manager, DIRECT_DENIAL_CATALOG)).isTrue();
+      assertThatThrownBy(
+              () -> deniedCatalog.loadTable(Identifier.of(new String[] {SCHEMA}, DENIED_TABLE)))
+          .isInstanceOf(ForbiddenException.class)
+          .hasMessageContaining("not authorized")
+          .hasMessageContaining("loadTable")
+          .hasMessageNotContaining(DorisTestCluster.TEST_PASSWORD);
+      assertDeniedIoRemainsZero(reset.generation());
+    } finally {
+      manager.reset();
+    }
+  }
+
+  @Test
+  void deniesSparkSqlBeforeAnyObservedDorisIo() {
+    SparkSession deniedSession = spark.newSession();
+    CatalogManager manager = deniedSession.sessionState().catalogManager();
+    assertThat(manager).isNotSameAs(spark.sessionState().catalogManager());
+    assertThat(isCatalogResolved(manager, SQL_DENIAL_CATALOG)).isFalse();
+
+    RecordingDorisTcpProxy.State reset = resetDeniedIoRecorders();
+    try {
+      assertThatThrownBy(
+              () ->
+                  deniedSession
+                      .sql("SELECT * FROM " + qualified(SQL_DENIAL_CATALOG, DENIED_TABLE))
+                      .collectAsList())
+          .hasMessageContaining("not authorized")
+          .hasMessageContaining("loadTable")
+          .hasMessageNotContaining(DorisTestCluster.TEST_PASSWORD);
+      assertThat(isCatalogResolved(manager, SQL_DENIAL_CATALOG)).isTrue();
+      assertDeniedIoRemainsZero(reset.generation());
+    } finally {
+      manager.reset();
+    }
+  }
+
+  @Test
+  void rejectsUnsafeCatalogConfigurationWithoutObservedDorisIo() {
+    RecordingDorisTcpProxy.State reset = resetDeniedIoRecorders();
+    String maliciousSecret = "catalog-security-secret-canary";
+
+    List<Map<String, String>> unsafeProperties = new ArrayList<>();
+    Map<String, String> embeddedCredential =
+        catalogProperties(false, tcpProxy.jdbcUrl(RecordingDorisTcpProxy.Lane.DENIAL));
+    embeddedCredential.put(
+        "jdbc-url",
+        tcpProxy
+            .jdbcUrl(RecordingDorisTcpProxy.Lane.DENIAL)
+            .replace("jdbc:mysql://", "jdbc:mysql://reader:" + maliciousSecret + "@"));
+    unsafeProperties.add(embeddedCredential);
+
+    Map<String, String> encodedParameter =
+        catalogProperties(false, tcpProxy.jdbcUrl(RecordingDorisTcpProxy.Lane.DENIAL));
+    encodedParameter.put(
+        "jdbc-url",
+        tcpProxy.jdbcUrl(RecordingDorisTcpProxy.Lane.DENIAL) + "?auto%2544eserialize=true");
+    unsafeProperties.add(encodedParameter);
+
+    Map<String, String> connectionProperties =
+        catalogProperties(false, tcpProxy.jdbcUrl(RecordingDorisTcpProxy.Lane.DENIAL));
+    connectionProperties.put("gravitino.bypass.connectionProperties", "auto\\u0044eserialize=true");
+    unsafeProperties.add(connectionProperties);
+
+    Map<String, String> classLoading =
+        catalogProperties(false, tcpProxy.jdbcUrl(RecordingDorisTcpProxy.Lane.DENIAL));
+    classLoading.put("gravitino.bypass.connectionFactoryClassName", maliciousSecret);
+    unsafeProperties.add(classLoading);
+
+    Map<String, String> connectionInitSqls =
+        catalogProperties(false, tcpProxy.jdbcUrl(RecordingDorisTcpProxy.Lane.DENIAL));
+    connectionInitSqls.put(
+        "gravitino.bypass.connectionInitSqls", "SELECT '" + maliciousSecret + "'");
+    unsafeProperties.add(connectionInitSqls);
+
+    Map<String, String> identityOverride =
+        catalogProperties(false, tcpProxy.jdbcUrl(RecordingDorisTcpProxy.Lane.DENIAL));
+    identityOverride.put("gravitino.bypass.url", "jdbc:mysql://" + maliciousSecret + ":9030/");
+    unsafeProperties.add(identityOverride);
+
+    for (int index = 0; index < unsafeProperties.size(); index++) {
+      String catalogName = "unsafe_jdbc_catalog_" + index;
+      Map<String, String> properties = unsafeProperties.get(index);
+      assertThatThrownBy(
+              () ->
+                  metalake.createCatalog(
+                      catalogName,
+                      Catalog.Type.RELATIONAL,
+                      PROVIDER,
+                      "Unsafe JDBC catalog must be rejected",
+                      properties))
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessageNotContaining(maliciousSecret)
+          .hasMessageNotContaining(DorisTestCluster.TEST_PASSWORD)
+          .hasMessageNotContaining(properties.get("jdbc-url"));
+    }
+    assertDeniedIoRemainsZero(reset.generation());
+  }
+
+  private RecordingDorisTcpProxy.State resetDeniedIoRecorders() {
     feProxy.reset();
-    assertThatThrownBy(
-            () -> spark.sql("SELECT * FROM " + qualified(CATALOG, DENIED_TABLE)).collectAsList())
-        .hasMessageContaining("not authorized")
-        .hasMessageContaining("loadTable");
-    assertThat(feProxy.totalRequestCount()).isZero();
+    RecordingDorisTcpProxy.State state = tcpProxy.reset(RecordingDorisTcpProxy.Lane.DENIAL);
+    assertThat(state.accepted()).isZero();
+    assertThat(state.active()).isZero();
+    return state;
+  }
+
+  private void assertDeniedIoRemainsZero(long generation) {
+    await()
+        .during(Duration.ofSeconds(1))
+        .atMost(Duration.ofSeconds(3))
+        .untilAsserted(
+            () -> {
+              RecordingDorisTcpProxy.State state =
+                  tcpProxy.state(RecordingDorisTcpProxy.Lane.DENIAL);
+              assertThat(state.generation()).isEqualTo(generation);
+              assertThat(state.accepted()).isZero();
+              assertThat(state.active()).isZero();
+              assertThat(feProxy.totalRequestCount()).isZero();
+            });
   }
 
   @Test
@@ -735,7 +861,7 @@ public class GovernedDorisConnectorIT {
         GravitinoAdminClient.builder(gravitino.uri())
             .withSimpleAuth(GravitinoTestServer.ADMIN_USER)
             .build();
-    GravitinoMetalake metalake =
+    metalake =
         adminClient.createMetalake(
             METALAKE, "Governed Doris connector integration tests", Map.of());
     governedClient =
@@ -758,8 +884,28 @@ public class GovernedDorisConnectorIT {
             PROVIDER,
             "Governed Doris partitioned SQL-lane catalog",
             catalogProperties(true));
+    Catalog recorderControlCatalog =
+        metalake.createCatalog(
+            RECORDER_CONTROL_CATALOG,
+            Catalog.Type.RELATIONAL,
+            PROVIDER,
+            "Governed Doris TCP recorder control catalog",
+            recordingCatalogProperties(RecordingDorisTcpProxy.Lane.CONTROL));
+    metalake.createCatalog(
+        DIRECT_DENIAL_CATALOG,
+        Catalog.Type.RELATIONAL,
+        PROVIDER,
+        "Fresh direct authorization-denial catalog",
+        recordingCatalogProperties(RecordingDorisTcpProxy.Lane.DENIAL));
+    metalake.createCatalog(
+        SQL_DENIAL_CATALOG,
+        Catalog.Type.RELATIONAL,
+        PROVIDER,
+        "Fresh SQL authorization-denial catalog",
+        recordingCatalogProperties(RecordingDorisTcpProxy.Lane.DENIAL));
     catalog.asSchemas().loadSchema(SCHEMA);
     partitionedCatalog.asSchemas().loadSchema(SCHEMA);
+    recorderControlCatalog.asSchemas().loadSchema(SCHEMA);
 
     List<String> mainTables =
         new ArrayList<>(
@@ -777,18 +923,26 @@ public class GovernedDorisConnectorIT {
     TableCatalog mainTableCatalog = catalog.asTableCatalog();
     mainTables.forEach(name -> mainTableCatalog.loadTable(NameIdentifier.of(SCHEMA, name)));
     partitionedCatalog.asTableCatalog().loadTable(NameIdentifier.of(SCHEMA, PARTITIONED_TABLE));
+    recorderControlCatalog.asTableCatalog().loadTable(NameIdentifier.of(SCHEMA, COMMON_TABLE));
 
     metalake.addUser(READER);
     List<SecurableObject> grants = new ArrayList<>();
     addReadGrants(grants, CATALOG, mainTables, DENIED_TABLE);
     addReadGrants(grants, PARTITIONED_CATALOG, Collections.singletonList(PARTITIONED_TABLE), null);
+    addReadGrants(grants, RECORDER_CONTROL_CATALOG, Collections.singletonList(COMMON_TABLE), null);
+    addReadGrants(grants, DIRECT_DENIAL_CATALOG, Collections.emptyList(), null);
+    addReadGrants(grants, SQL_DENIAL_CATALOG, Collections.emptyList(), null);
     metalake.createRole(READER_ROLE, new HashMap<>(), grants);
     metalake.grantRolesToUser(ImmutableList.of(READER_ROLE), READER);
   }
 
   private Map<String, String> catalogProperties(boolean partitioned) {
+    return catalogProperties(partitioned, doris.internalJdbcUrl());
+  }
+
+  private Map<String, String> catalogProperties(boolean partitioned, String jdbcUrl) {
     Map<String, String> properties = new HashMap<>();
-    properties.put("jdbc-url", doris.internalJdbcUrl());
+    properties.put("jdbc-url", jdbcUrl);
     properties.put("jdbc-driver", "com.mysql.cj.jdbc.Driver");
     properties.put("jdbc-user", DorisTestCluster.TEST_USER);
     properties.put("jdbc-password", DorisTestCluster.TEST_PASSWORD);
@@ -806,6 +960,62 @@ public class GovernedDorisConnectorIT {
       properties.put("doris-jdbc-fetch-size", "32");
     }
     return properties;
+  }
+
+  private Map<String, String> recordingCatalogProperties(RecordingDorisTcpProxy.Lane lane) {
+    Map<String, String> properties = catalogProperties(false, tcpProxy.jdbcUrl(lane));
+    properties.put("gravitino.bypass.maxIdle", "0");
+    return properties;
+  }
+
+  private void verifyRecorderControls() {
+    RecordingDorisTcpProxy.State serverControl =
+        tcpProxy.state(RecordingDorisTcpProxy.Lane.CONTROL);
+    assertThat(serverControl.accepted())
+        .as("Gravitino metadata must traverse the control TCP proxy")
+        .isPositive();
+
+    SparkSession controlSession = spark.newSession();
+    CatalogManager controlManager = controlSession.sessionState().catalogManager();
+    assertThat(controlManager).isNotSameAs(spark.sessionState().catalogManager());
+    assertThat(isCatalogResolved(controlManager, RECORDER_CONTROL_CATALOG)).isFalse();
+    try {
+      feProxy.reset();
+      controlSession
+          .table(qualified(RECORDER_CONTROL_CATALOG, COMMON_TABLE))
+          .select("id")
+          .collectAsList();
+      assertThat(feProxy.totalRequestCount())
+          .as("native table loading must traverse the FE HTTP recorder")
+          .isPositive();
+
+      long acceptedBeforeSql = tcpProxy.state(RecordingDorisTcpProxy.Lane.CONTROL).accepted();
+      controlSession
+          .sql("SELECT COUNT(*) FROM " + qualified(RECORDER_CONTROL_CATALOG, COMMON_TABLE))
+          .collectAsList();
+      await()
+          .atMost(Duration.ofSeconds(5))
+          .untilAsserted(
+              () ->
+                  assertThat(tcpProxy.state(RecordingDorisTcpProxy.Lane.CONTROL).accepted())
+                      .as("Spark SQL lane must traverse the control TCP proxy")
+                      .isGreaterThan(acceptedBeforeSql));
+      await()
+          .atMost(Duration.ofSeconds(5))
+          .untilAsserted(
+              () ->
+                  assertThat(tcpProxy.state(RecordingDorisTcpProxy.Lane.CONTROL).active())
+                      .as("positive-control JDBC connections must close before denial tests")
+                      .isZero());
+    } finally {
+      controlManager.reset();
+    }
+
+    RecordingDorisTcpProxy.State denial = tcpProxy.state(RecordingDorisTcpProxy.Lane.DENIAL);
+    assertThat(denial.accepted())
+        .as("denial catalogs must prove that the dedicated TCP listener is reachable before reset")
+        .isPositive();
+    assertThat(denial.active()).isZero();
   }
 
   private void startSpark() {
@@ -841,8 +1051,29 @@ public class GovernedDorisConnectorIT {
   }
 
   private org.apache.spark.sql.connector.catalog.TableCatalog sparkCatalog(String name) {
-    CatalogManager manager = spark.sessionState().catalogManager();
+    return sparkCatalog(spark, name);
+  }
+
+  private org.apache.spark.sql.connector.catalog.TableCatalog sparkCatalog(
+      SparkSession session, String name) {
+    CatalogManager manager = session.sessionState().catalogManager();
     return (org.apache.spark.sql.connector.catalog.TableCatalog) manager.catalog(name);
+  }
+
+  @SuppressWarnings("unchecked")
+  private static boolean isCatalogResolved(CatalogManager manager, String catalogName) {
+    // Spark 3.5 has no side-effect-free public API for this assertion. Keep this test-only private
+    // field access as an explicit compatibility watchpoint; the release-certified 3.5.8 real IT
+    // must fail if Spark changes the CatalogManager cache layout.
+    try {
+      Field catalogsField = CatalogManager.class.getDeclaredField("catalogs");
+      catalogsField.setAccessible(true);
+      scala.collection.mutable.HashMap<String, Object> catalogs =
+          (scala.collection.mutable.HashMap<String, Object>) catalogsField.get(manager);
+      return catalogs.contains(catalogName);
+    } catch (ReflectiveOperationException e) {
+      throw new IllegalStateException("Unable to inspect the Spark catalog resolution cache", e);
+    }
   }
 
   private Dataset<Row> directPartitionedFrame() {

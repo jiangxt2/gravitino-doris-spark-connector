@@ -19,7 +19,7 @@ java -version
 These tasks cover property protection, credential resolution, explicit authorization ordering,
 schema/type compatibility, cache behavior, hybrid planner state, capability filtering, plugin
 registration, provider loading, distribution assembly, repository container-label configuration,
-and resolved Spark-module version consistency.
+resolved Spark-module version consistency, and the shared JDBC URL/driver/DBCP security matrix.
 
 ## Spark compatibility gates
 
@@ -51,11 +51,36 @@ Each invocation starts:
 - `apache/gravitino:1.3.0` with the built independent provider mounted into its isolated catalog
   directory;
 - official split Doris FE and BE images for the selected version;
-- an FE HTTP recording proxy that stores only request method and path.
+- an FE HTTP recording proxy that stores only request method and path;
+- a digest-pinned, JDK-only transparent TCP proxy with independent control and denial listeners.
 
 The tests verify direct-result parity, planner pushdown, four-partition JDBC parity, type
-normalization, authorization-before-I/O, cache/refresh, credential redaction, and read-only
-boundaries.
+normalization, authorization-before-I/O, cache/refresh, credential redaction, JDBC configuration
+rejection, and read-only boundaries.
+
+The TCP helper records only accepted/active connection counts and a reset generation. It never
+parses or stores MySQL handshakes, SQL, credentials, or other payload bytes. Positive controls first
+prove that Gravitino metadata JDBC, Spark SQL JDBC, and native FE HTTP requests traverse the
+recorders. Direct `TableCatalog.loadTable` and Spark SQL denial then use different `newSession()`
+SessionState/CatalogManager instances and different catalog names. The tests inspect Spark's
+resolved-catalog cache without calling `isCatalogRegistered`, because that Spark method resolves the
+catalog as a side effect. Each denial starts only after the denial TCP listener has no active
+connections and a new generation with zero accepted connections.
+
+During a short post-failure observation window, both denial paths require FE HTTP requests, TCP
+accepted connections, and TCP active connections to remain zero. Unit tests separately prove that
+physical-catalog `loadTable`, schema loaders, scan builders, and reader factories are not entered.
+The catalog object itself is initialized when Spark resolves a catalog name. No test packet-captures
+BE/native ports, so the evidence must not be described as direct observation of all Doris network
+traffic.
+
+The JDBC security unit matrix covers the exact driver, ordinary URL grammar, malformed and encoded
+forms, embedded credentials, dangerous Connector/J names, raw and encoded
+`gravitino.bypass.*` keys, DBCP class-loading/identity/eager-init/SQL-execution/exposure properties,
+and one-level `connectionProperties` parsing with semicolons, newlines, continuation, Unicode, and
+malformed escapes. Deeply nested `connectionProperties` must fail with a bounded validation error,
+never `StackOverflowError`. Malicious catalog creation, including `connectionInitSqls`, is also
+exercised through the real Gravitino Admin API and must leave both recorders unchanged.
 
 A directly registered Spark JDBC V2 catalog is the partition-count, lossless-column, aggregate-plan,
 and timing baseline. It uses the same `JDBCTableCatalog/JDBCTable` implementation as Gravitino's
@@ -124,4 +149,4 @@ Gradle XML and HTML reports are under `integration-tests/build/test-results/` an
 `integration-tests/build/reports/tests/`. Container output is attached to the Gradle test log.
 CI uploads reports when a gate fails. Failure-time Docker inventory and log collection select only
 containers labeled `io.github.jiangxt2.gravitino-doris-spark-connector.it=true`; the integration
-tests verify that Doris FE, Doris BE, and Gravitino carry that label.
+tests verify that Doris FE, Doris BE, Gravitino, and the TCP proxy carry that label.

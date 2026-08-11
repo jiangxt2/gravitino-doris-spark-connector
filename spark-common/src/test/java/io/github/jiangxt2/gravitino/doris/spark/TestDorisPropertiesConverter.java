@@ -158,6 +158,41 @@ public class TestDorisPropertiesConverter {
   }
 
   @Test
+  void testRejectsJdbcIdentityAndCredentialOptionsAcrossSources() {
+    for (String property :
+        new String[] {
+          DorisConnectorConstants.JDBC_URL,
+          DorisConnectorConstants.JDBC_DRIVER,
+          DorisConnectorConstants.JDBC_USER,
+          DorisConnectorConstants.JDBC_PASSWORD
+        }) {
+      String secret = "option-secret-" + property;
+      IllegalArgumentException optionFailure =
+          assertThrows(
+              IllegalArgumentException.class,
+              () ->
+                  converter.toSparkCatalogProperties(
+                      new CaseInsensitiveStringMap(ImmutableMap.of(property, secret)),
+                      validEndpoints()));
+      assertTrue(optionFailure.getMessage().contains(property));
+      assertFalse(optionFailure.getMessage().contains(secret));
+
+      IllegalArgumentException bypassFailure =
+          assertThrows(
+              IllegalArgumentException.class,
+              () ->
+                  converter.toSparkCatalogProperties(
+                      new CaseInsensitiveStringMap(ImmutableMap.of()),
+                      ImmutableMap.<String, String>builder()
+                          .putAll(validEndpoints())
+                          .put(PropertiesConverter.SPARK_PROPERTY_PREFIX + property, secret)
+                          .build()));
+      assertTrue(bypassFailure.getMessage().contains(property));
+      assertFalse(bypassFailure.getMessage().contains(secret));
+    }
+  }
+
+  @Test
   void testRejectsCredentialBackfillWithoutExposingValues() {
     IllegalArgumentException failure =
         assertThrows(
@@ -220,5 +255,13 @@ public class TestDorisPropertiesConverter {
                     "fe:8030",
                     DorisConnectorConstants.GRAVITINO_DORIS_QUERY_PORT,
                     "9030")));
+  }
+
+  private static Map<String, String> validEndpoints() {
+    return ImmutableMap.of(
+        DorisConnectorConstants.GRAVITINO_DORIS_FE_NODES,
+        "fe:8030",
+        DorisConnectorConstants.GRAVITINO_DORIS_QUERY_PORT,
+        "9030");
   }
 }

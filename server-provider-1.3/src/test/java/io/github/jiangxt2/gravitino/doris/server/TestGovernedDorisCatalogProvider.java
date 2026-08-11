@@ -17,11 +17,15 @@ package io.github.jiangxt2.gravitino.doris.server;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.util.HashMap;
+import java.util.Map;
 import java.util.ServiceLoader;
 import org.apache.gravitino.CatalogProvider;
 import org.junit.jupiter.api.Test;
 
 public class TestGovernedDorisCatalogProvider {
+
+  private static final String DRIVER = "com.mysql.cj.jdbc.Driver";
 
   @Test
   void hasUniqueServiceLoadedShortNameAndRequiredEndpoint() {
@@ -50,5 +54,42 @@ public class TestGovernedDorisCatalogProvider {
         .isTrue();
     assertThat(provider.catalogPropertiesMetadata().containsProperty("doris-jdbc-num-partitions"))
         .isTrue();
+  }
+
+  @Test
+  void validatesRawCatalogConfigurationBeforeJdbcInitialization() {
+    GovernedDorisCatalogProvider provider = new GovernedDorisCatalogProvider();
+    Map<String, String> safe = validProperties();
+    assertThat(provider.withCatalogConf(safe)).isSameAs(provider);
+
+    Map<String, String> unsafe = validProperties();
+    unsafe.put("gravitino.bypass.connectionFactoryClassName", "example.SecretCanary");
+    assertThatThrownBy(() -> provider.withCatalogConf(unsafe))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("connectionFactoryClassName")
+        .hasMessageNotContaining("SecretCanary");
+  }
+
+  @Test
+  void rejectsMalformedConnectionPropertiesWithoutEchoingValues() {
+    GovernedDorisCatalogProvider provider = new GovernedDorisCatalogProvider();
+    Map<String, String> properties = validProperties();
+    String malformed = "bad\\" + "u12G4=provider-secret-canary";
+    properties.put("gravitino.bypass.connectionProperties", malformed);
+
+    assertThatThrownBy(() -> provider.withCatalogConf(properties))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("Unable to validate JDBC connectionProperties")
+        .hasMessageNotContaining("provider-secret-canary")
+        .hasMessageNotContaining(malformed);
+  }
+
+  private static Map<String, String> validProperties() {
+    Map<String, String> properties = new HashMap<>();
+    properties.put("jdbc-url", "jdbc:mysql://fe:9030/");
+    properties.put("jdbc-driver", DRIVER);
+    properties.put("jdbc-user", "reader");
+    properties.put("jdbc-password", "provider-secret-canary");
+    return properties;
   }
 }

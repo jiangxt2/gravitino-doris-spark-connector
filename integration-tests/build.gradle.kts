@@ -13,6 +13,7 @@
  */
 
 import java.nio.file.Files
+import java.nio.file.attribute.PosixFilePermissions
 
 description = "Standalone Gravitino, Spark, and Doris integration tests"
 
@@ -87,10 +88,17 @@ val integrationTest by tasks.registering(Test::class) {
     }
     val temporaryRoot =
         Files.createDirectories(layout.buildDirectory.dir("tmp").get().asFile.toPath())
+    // Linux CI honors host permissions strictly and the Gravitino entrypoint runs as a non-root
+    // user, so the 0700 default of createTempDirectory would block the container from reading
+    // the mounted directory ("find: Permission denied"). Docker Desktop on macOS relaxes this,
+    // which is why the failure only appears on CI. Relax both directories to 755.
     val emptyExternalDriverDirectory =
         Files.createTempDirectory(temporaryRoot, "external-jdbc-driver-").toFile().canonicalFile
     val installedExternalDriverDirectory =
         Files.createTempDirectory(temporaryRoot, "installed-jdbc-driver-").toFile().canonicalFile
+    listOf(emptyExternalDriverDirectory, installedExternalDriverDirectory).forEach {
+      Files.setPosixFilePermissions(it.toPath(), PosixFilePermissions.fromString("rwxr-xr-x"))
+    }
     // Gravitino 1.3.0 links only mysql-connector-java-*.jar from /opt/gravitino/jdbc-drivers.
     Files.copy(
         jdbcDriver.toPath(),

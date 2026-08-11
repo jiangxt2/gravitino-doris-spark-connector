@@ -110,6 +110,21 @@ public class GovernedDorisConnectorIT {
         Paths.get(requiredSystemProperty("connector.repository.root")).toAbsolutePath();
     Path providerDirectory =
         Paths.get(requiredSystemProperty("connector.provider.directory")).toAbsolutePath();
+    Path jdbcDriver =
+        Paths.get(requiredSystemProperty("connector.mysql.driver.path")).toAbsolutePath();
+    Path externalDriverDirectory =
+        Paths.get(requiredSystemProperty("connector.empty.jdbc.driver.directory")).toAbsolutePath();
+    Path installedDriverDirectory =
+        Paths.get(requiredSystemProperty("connector.installed.jdbc.driver.directory"))
+            .toAbsolutePath();
+    assertThat(jdbcDriver).isRegularFile();
+    assertThat(jdbcDriver.normalize().startsWith(providerDirectory.normalize())).isFalse();
+    assertThat(externalDriverDirectory).isDirectory().isEmptyDirectory();
+    // The Gravitino 1.3.0 entrypoint recognizes this legacy filename pattern, even though the
+    // current Maven artifact is mysql-connector-j.
+    assertThat(installedDriverDirectory.resolve("mysql-connector-java-8.0.33.jar")).isRegularFile();
+    assertThat(installedDriverDirectory.normalize().startsWith(providerDirectory.normalize()))
+        .isFalse();
     String version = System.getProperty("doris.version", "3.0.6.2");
     assertThat(version).isIn("3.0.6.2", "4.0.6");
 
@@ -122,7 +137,8 @@ public class GovernedDorisConnectorIT {
       tcpProxy.start();
       createPhysicalTables();
 
-      gravitino = new GravitinoTestServer(network, providerDirectory);
+      verifyMissingServerDriverFailsBeforeDorisIo(providerDirectory, externalDriverDirectory);
+      gravitino = new GravitinoTestServer(network, providerDirectory, installedDriverDirectory);
       gravitino.start();
       createGovernedMetadata();
       startSpark();
@@ -598,6 +614,37 @@ public class GovernedDorisConnectorIT {
           .hasMessageNotContaining(properties.get("jdbc-url"));
     }
     assertDeniedIoRemainsZero(reset.generation());
+  }
+
+  private void verifyMissingServerDriverFailsBeforeDorisIo(
+      Path providerDirectory, Path externalDriverDirectory) {
+    try (GravitinoTestServer serverWithoutDriver =
+        new GravitinoTestServer(network, providerDirectory, externalDriverDirectory)) {
+      serverWithoutDriver.start();
+      try (GravitinoAdminClient client =
+          GravitinoAdminClient.builder(serverWithoutDriver.uri())
+              .withSimpleAuth(GravitinoTestServer.ADMIN_USER)
+              .build()) {
+        GravitinoMetalake missingDriverMetalake =
+            client.createMetalake("missing_driver", "Missing external JDBC driver smoke", Map.of());
+        RecordingDorisTcpProxy.State reset = resetDeniedIoRecorders();
+
+        assertThatThrownBy(
+                () ->
+                    missingDriverMetalake.createCatalog(
+                        "missing_driver_catalog",
+                        Catalog.Type.RELATIONAL,
+                        PROVIDER,
+                        "Catalog creation must fail before Doris I/O",
+                        recordingCatalogProperties(RecordingDorisTcpProxy.Lane.DENIAL)))
+            .isInstanceOf(RuntimeException.class)
+            .hasMessageContaining("com.mysql:mysql-connector-j:8.0.33")
+            .hasMessageContaining("$GRAVITINO_HOME/catalogs/doris-governed/libs")
+            .hasMessageNotContaining(DorisTestCluster.TEST_PASSWORD)
+            .hasMessageNotContaining(tcpProxy.jdbcUrl(RecordingDorisTcpProxy.Lane.DENIAL));
+        assertDeniedIoRemainsZero(reset.generation());
+      }
+    }
   }
 
   private RecordingDorisTcpProxy.State resetDeniedIoRecorders() {

@@ -65,6 +65,7 @@ Spark SQL
      -> register provider=doris-governed
   -> GovernedDorisCatalogSpark35.initialize
      -> shared JDBC URL/driver validation
+     -> MySQL Driver availability preflight
      -> physical catalog construction and credential vending
   -> GovernedDorisCatalogSpark35.loadTable
      -> Gravitino TableCatalog.loadTable(identifier, SELECT_TABLE)
@@ -101,6 +102,24 @@ Failures use fixed messages and never include raw connection material.
 This boundary is configuration hardening, not transport certification. Strict TLS and endpoint
 identity/coherence remain separate work; the current native and SQL lanes must not be described as
 verified-TLS paths.
+
+## Distribution and dependency integrity boundary
+
+The project archive contains the independent Spark adapter, Gravitino provider, shared JDBC
+security module, official Doris connector, shaded Gravitino Spark runtime, and required
+transitives. Spark core/SQL/Catalyst, server-provided Guava/logging libraries, and MySQL Connector/J
+remain outside the archive.
+
+`verifyDistributionDependencyContract` compares `installDist`, tar, and zip file sets, checks
+required documentation/configuration, rejects target-provided libraries, and scans every JAR for
+the MySQL Driver class. The three production distribution configurations use strict Gradle lock
+state. SHA-256 dependency verification covers Gradle-resolved plugin, artifact, and metadata bytes,
+while GitHub Actions are fixed to full commit SHAs. These controls establish reproducible reviewed
+inputs and archive boundaries; they do not prove publisher identity or provide a final-binary SBOM.
+
+Final release operations must scan the completed tar/zip and publish a sidecar SBOM bound to the
+same archive digest, signature, and attestation. Generating a project-resolution SBOM during this
+build would not prove the contents of the final binary archive.
 
 ## Hybrid scan selection
 
@@ -190,3 +209,5 @@ credential resolution.
 | No architecture rewrite for future writes | centralized policy and delegates | capability and explicit-rejection tests |
 | JDBC configuration fails closed before I/O | shared `jdbc-security` module on server and Spark | exhaustive parser tests and malicious-catalog IT |
 | Authorization denial avoids observed Doris entry points | fresh catalog managers plus HTTP/TCP recorders | direct and SQL denial IT on both Doris versions |
+| Production dependency boundary is auditable | strict distribution lock, SHA-256 verification, immutable workflow actions, archive scanner | empty-cache build, compatibility matrix, and distribution contract |
+| Connector/J remains external | Driver preflight plus zero-class archive scan | missing/present Driver IT and all three distribution forms |

@@ -130,6 +130,25 @@ public class TestGovernedDorisAuthorization {
   }
 
   @Test
+  void missingExternalJdbcDriverFailsBeforePhysicalCatalogConstruction() {
+    SecurityOrderingCatalog securityCatalog = new SecurityOrderingCatalog();
+    Map<String, String> properties =
+        Map.of(
+            DorisConnectorConstants.JDBC_URL,
+            "jdbc:mysql://fe:9030/",
+            DorisConnectorConstants.JDBC_DRIVER,
+            "com.mysql.cj.jdbc.Driver");
+
+    assertThatThrownBy(() -> securityCatalog.createPhysicalCatalog(properties))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("com.mysql:mysql-connector-j:8.0.33")
+        .hasMessageContaining("Spark driver")
+        .hasMessageContaining("every executor")
+        .hasMessageNotContaining("jdbc:mysql://fe:9030/");
+    assertThat(securityCatalog.physicalCatalogCreations).isZero();
+  }
+
+  @Test
   void physicalTableCreationFailureIsSanitizedAfterAuthorization() throws Exception {
     Identifier identifier = Identifier.of(new String[] {"analytics"}, "events");
     org.apache.gravitino.rel.Table logical = mock(org.apache.gravitino.rel.Table.class);

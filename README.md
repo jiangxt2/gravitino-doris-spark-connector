@@ -67,12 +67,28 @@ gravitino/catalogs/doris-governed/libs/      Gravitino provider jars
 gravitino/catalogs/doris-governed/conf/      Provider configuration
 ```
 
-The root of that directory also contains the pinned runtime and license inventory from
-[DEPENDENCIES.md](DEPENDENCIES.md).
+The root of that directory also contains the runtime and license inventory from
+[DEPENDENCIES.md](DEPENDENCIES.md). `installDist`, `distTar`, and `distZip` contain identical file
+sets and deliberately contain neither a MySQL Connector/J file nor
+`com/mysql/cj/jdbc/Driver.class` in any JAR.
 
 Copy the contents of `gravitino/catalogs/doris-governed/` to
-`$GRAVITINO_HOME/catalogs/doris-governed/`. Add every jar under `spark/jars/` to both the Spark
-driver and executor classpaths.
+`$GRAVITINO_HOME/catalogs/doris-governed/`. MySQL Connector/J is an external deployment
+prerequisite, not a redistributed project component. This project tests
+`com.mysql:mysql-connector-j:8.0.33`:
+
+- install the Driver JAR in `$GRAVITINO_HOME/catalogs/doris-governed/libs` before starting a
+  non-containerized Gravitino Server;
+- for the official Gravitino 1.3.0 image, mount a controlled directory containing the selected
+  Driver, plus any separately audited JDBC drivers required by other catalogs, at
+  `/opt/gravitino/jdbc-drivers`; the image entrypoint recognizes the legacy filename pattern
+  `mysql-connector-java-*.jar`;
+- add the same Driver JAR and every JAR under `spark/jars/` to the Spark driver and every executor
+  classpath with `--jars`, `spark.jars`, or the equivalent cluster-manager mechanism.
+
+The server and Spark adapter fail with fixed, redacted installation guidance when the Driver class
+is unavailable before physical JDBC catalog construction. Executor availability is a deployment
+responsibility and is exercised when executor-side JDBC/native code loads its dependencies.
 
 ## Create a governed catalog
 
@@ -124,7 +140,7 @@ parameters to the current catalog does not create a supported secure-transport m
 
 ```bash
 spark-shell \
-  --jars "$(find /path/to/distribution/spark/jars -name '*.jar' -print | paste -sd, -)" \
+  --jars "/path/to/mysql-connector-j-8.0.33.jar,$(find /path/to/distribution/spark/jars -name '*.jar' -print | paste -sd, -)" \
   --conf spark.plugins=io.github.jiangxt2.gravitino.doris.spark.GovernedDorisSparkPlugin \
   --conf spark.sql.gravitino.uri=http://gravitino:8090 \
   --conf spark.sql.gravitino.metalake=production
@@ -164,7 +180,10 @@ type is authoritative for the String/base64 execution representation.
 Use Java 17:
 
 ```bash
-./gradlew spotlessCheck test installDist verifySparkDependencyVersions
+./gradlew spotlessCheck test installDist \
+  :distribution:resolveDistributionLocks \
+  :distribution:verifyDistributionDependencyContract \
+  verifySparkDependencyVersions
 ```
 
 Compatibility checks for the currently verified Spark 3.5 boundaries run in separate Gradle
@@ -172,8 +191,10 @@ processes without starting Doris:
 
 ```bash
 ./gradlew test installDist :integration-tests:compileIntegrationTestJava \
+  :distribution:verifyDistributionDependencyContract \
   verifySparkDependencyVersions -PsparkVersion=3.5.0
 ./gradlew test installDist :integration-tests:compileIntegrationTestJava \
+  :distribution:verifyDistributionDependencyContract \
   verifySparkDependencyVersions -PsparkVersion=3.5.9
 ```
 

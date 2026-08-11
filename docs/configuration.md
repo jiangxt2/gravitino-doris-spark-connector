@@ -20,6 +20,30 @@ Its host and port must therefore be routable from the Gravitino server, Spark dr
 executors. Use a service address shared by those network domains rather than a process-local
 `localhost` address.
 
+## JDBC Driver provisioning
+
+The project does not redistribute MySQL Connector/J. It validates the exact driver class name
+`com.mysql.cj.jdbc.Driver` and tests the Maven Central artifact
+`com.mysql:mysql-connector-j:8.0.33`.
+
+For a non-containerized Gravitino Server, place the Driver JAR in
+`$GRAVITINO_HOME/catalogs/doris-governed/libs` before startup. For the official Gravitino 1.3.0
+container, mount a controlled directory containing the chosen Driver and any separately audited
+JDBC drivers required by other catalogs at `/opt/gravitino/jdbc-drivers`. The 1.3.0 image entrypoint
+links files matching `mysql-connector-java-*.jar` into the server classpath, so the mounted filename
+must retain that legacy pattern even when the artifact uses the current `mysql-connector-j`
+coordinate.
+
+Pass the Driver together with the project Spark JARs through `--jars`, `spark.jars`, or the
+cluster-manager equivalent. Spark must make it visible to the driver and every executor. The
+adapter checks driver-side availability before it creates the physical catalog; executor-side
+availability remains a deployment responsibility.
+
+Missing Driver failures are fixed and redacted. The server message names the expected catalog
+library location; the Spark message names the driver/executor classpath requirement. Neither
+message contains the JDBC URL or credentials. These checks run after JDBC configuration validation,
+so an unsafe catalog is rejected before class loading is attempted.
+
 ## JDBC connection allow-list
 
 The same shared validator runs before Gravitino initializes its JDBC provider and again before

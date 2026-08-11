@@ -13,13 +13,23 @@ java -version
 ## Static and unit gates
 
 ```bash
-./gradlew spotlessCheck test installDist verifySparkDependencyVersions
+./gradlew spotlessCheck test installDist \
+  :distribution:resolveDistributionLocks \
+  :distribution:verifyDistributionDependencyContract \
+  verifySparkDependencyVersions
 ```
 
 These tasks cover property protection, credential resolution, explicit authorization ordering,
 schema/type compatibility, cache behavior, hybrid planner state, capability filtering, plugin
 registration, provider loading, distribution assembly, repository container-label configuration,
-resolved Spark-module version consistency, and the shared JDBC URL/driver/DBCP security matrix.
+resolved Spark-module version consistency, immutable workflow action references, and the shared
+JDBC URL/driver/DBCP security matrix. The distribution contract compares `installDist`, tar, and
+zip file sets, rejects target-provided libraries, and scans every JAR for the MySQL Driver class.
+
+`distribution/gradle.lockfile` strictly locks the three production distribution configurations.
+`gradle/verification-metadata.xml` enables Gradle SHA-256 verification automatically for plugins,
+artifacts, and metadata. The standalone CI lane uses a fresh `GRADLE_USER_HOME`, so a locally cached
+artifact cannot bypass that checksum gate.
 
 ## Spark compatibility gates
 
@@ -28,8 +38,10 @@ boundaries run in separate Gradle processes:
 
 ```bash
 ./gradlew test installDist :integration-tests:compileIntegrationTestJava \
+  :distribution:verifyDistributionDependencyContract \
   verifySparkDependencyVersions -PsparkVersion=3.5.0
 ./gradlew test installDist :integration-tests:compileIntegrationTestJava \
+  :distribution:verifyDistributionDependencyContract \
   verifySparkDependencyVersions -PsparkVersion=3.5.9
 ```
 
@@ -53,6 +65,13 @@ Each invocation starts:
 - official split Doris FE and BE images for the selected version;
 - an FE HTTP recording proxy that stores only request method and path;
 - a digest-pinned, JDK-only transparent TCP proxy with independent control and denial listeners.
+
+The Gravitino image contains its own Connector/J 8.0.27. The harness masks the image's
+`/opt/gravitino/jdbc-drivers` directory in both paths: the negative server receives an empty
+read-only directory, while the positive server receives a generated test directory containing only
+the resolved 8.0.33 Driver. That directory is under `integration-tests/build/tmp`, outside every
+production distribution form. The negative Admin API catalog creation must fail with fixed Driver
+installation guidance while FE HTTP and MySQL/JDBC TCP counters remain zero.
 
 The tests verify direct-result parity, planner pushdown, four-partition JDBC parity, type
 normalization, authorization-before-I/O, cache/refresh, credential redaction, JDBC configuration
@@ -150,3 +169,10 @@ Gradle XML and HTML reports are under `integration-tests/build/test-results/` an
 CI uploads reports when a gate fails. Failure-time Docker inventory and log collection select only
 containers labeled `io.github.jiangxt2.gravitino-doris-spark-connector.it=true`; the integration
 tests verify that Doris FE, Doris BE, Gravitino, and the TCP proxy carry that label.
+
+## Release evidence boundary
+
+These tests verify dependency resolution, locked production graphs, archive contents, and the
+external Driver contract. They do not generate or claim a final-binary SBOM. Release operations
+must scan the completed tar and zip with a fixed, checksum-verified binary scanner and publish the
+CycloneDX result as a sidecar bound to the archive digest/signature/attestation.

@@ -133,8 +133,7 @@ public final class DorisSchemaCompatibility {
       }
       if (requiresStringNormalization(
           logicalColumn.dataType(), physicalField.dataType(), dorisTypeName)) {
-        validateNormalizedType(
-            identifier, logicalColumn, physicalField, dorisTypeName, typeConverter);
+        validateNormalizedType(identifier, logicalColumn, physicalField, dorisTypeName);
         validatedFields.add(
             DataTypes.createStructField(
                 physicalField.name(),
@@ -226,8 +225,7 @@ public final class DorisSchemaCompatibility {
       Identifier identifier,
       Column logicalColumn,
       StructField physicalField,
-      String dorisTypeName,
-      SparkTypeConverter typeConverter) {
+      String dorisTypeName) {
     String physicalBaseType = dorisBaseType(dorisTypeName);
     if (logicalColumn.dataType() instanceof Types.ExternalType
         && isExternalDecimal(externalBaseType((Types.ExternalType) logicalColumn.dataType()))
@@ -237,12 +235,12 @@ public final class DorisSchemaCompatibility {
       return;
     }
     if ((physicalBaseType.isEmpty()
-            && isCompatibleNormalizedPhysicalType(
-                logicalColumn.dataType(), physicalField.dataType(), typeConverter))
+            && isCompatibleNormalizationWithoutTypeName(
+                logicalColumn.dataType(), physicalField.dataType()))
         || isJdbcLossyNormalizedType(physicalBaseType)
         || isCompatibleNormalizedType(logicalColumn.dataType(), physicalBaseType)
         || (isGenericJdbcPlaceholder(logicalColumn.dataType())
-            && !isStrictNormalizedType(physicalBaseType))) {
+            && isKnownGenericNormalizedType(physicalBaseType))) {
       return;
     }
     throw incompatible(
@@ -252,19 +250,12 @@ public final class DorisSchemaCompatibility {
             logicalColumn.name(), logicalColumn.dataType().simpleString(), dorisTypeName));
   }
 
-  private static boolean isCompatibleNormalizedPhysicalType(
-      Type logicalType, DataType physicalType, SparkTypeConverter typeConverter) {
-    if (logicalType instanceof Types.ExternalType) {
-      return DataTypes.StringType.equals(physicalType);
-    }
+  private static boolean isCompatibleNormalizationWithoutTypeName(
+      Type logicalType, DataType physicalType) {
     if (logicalType instanceof Types.TimestampType) {
       return DataTypes.TimestampType.equals(physicalType);
     }
-    try {
-      return typeConverter.toSparkType(logicalType).equals(physicalType);
-    } catch (RuntimeException e) {
-      return false;
-    }
+    return logicalType instanceof Types.BinaryType && DataTypes.BinaryType.equals(physicalType);
   }
 
   private static boolean isJdbcLossyNormalizedType(String physicalBaseType) {
@@ -280,20 +271,20 @@ public final class DorisSchemaCompatibility {
         || "hll".equals(physicalBaseType);
   }
 
-  private static boolean isStrictNormalizedType(String physicalBaseType) {
-    return "datetime".equals(physicalBaseType)
-        || "datetimev2".equals(physicalBaseType)
-        || "binary".equals(physicalBaseType)
-        || "varbinary".equals(physicalBaseType)
-        || physicalBaseType.endsWith(" unsigned");
-  }
-
   private static boolean isGenericJdbcPlaceholder(Type logicalType) {
     if (!(logicalType instanceof Types.ExternalType)) {
       return false;
     }
     String logicalBaseType = externalBaseType((Types.ExternalType) logicalType);
     return "unknown".equals(logicalBaseType) || "other".equals(logicalBaseType);
+  }
+
+  private static boolean isKnownGenericNormalizedType(String physicalBaseType) {
+    return "json".equals(physicalBaseType)
+        || "jsonb".equals(physicalBaseType)
+        || "variant".equals(physicalBaseType)
+        || "ipv4".equals(physicalBaseType)
+        || "ipv6".equals(physicalBaseType);
   }
 
   private static boolean isCompatibleNormalizedType(Type logicalType, String physicalBaseType) {

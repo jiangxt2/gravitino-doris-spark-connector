@@ -77,6 +77,13 @@ The tests verify direct-result parity, planner pushdown, four-partition JDBC par
 normalization, authorization-before-I/O, cache/refresh, credential redaction, JDBC configuration
 rejection, and read-only boundaries.
 
+The cache contract counts FE schema requests. Ordinary compatible hits reuse one immutable
+Catalyst/type-name pair; explicit invalidation reloads only the target key. The schema-drift test
+alters a real Doris table, then proves that Spark's pre-invalidation `REFRESH TABLE` analysis makes
+exactly one conditional replacement load before the command invalidates the key. The next table
+load fetches a complete snapshot again. Fresh incompatibility and physical-load errors remain
+fail-closed and are not retried.
+
 The TCP helper records only accepted/active connection counts and a reset generation. It never
 parses or stores MySQL handshakes, SQL, credentials, or other payload bytes. Positive controls first
 prove that Gravitino metadata JDBC, Spark SQL JDBC, and native FE HTTP requests traverse the
@@ -108,6 +115,37 @@ direct Doris `ResultSet.getString` output as the authoritative value because the
 Catalyst timestamp path can apply a JVM time-zone conversion. Boolean lexical forms and
 aggregate-decimal trailing scale zeros are compared by value; all other fields, schemas, row
 counts, partitions, and plans remain strict.
+
+## Type contract evidence
+
+`GovernedDorisConnectorIT.recordsTypeContractForCurrentDorisVersion` runs on both certified Doris
+versions. It executes every probe: supported forms complete DDL, insert, provider loading, Spark
+schema, value, partition, and representative-lane assertions; probe-only forms assert the observed
+DDL rejection category. No version branch skips a probe.
+
+| Doris DDL form | 3.0.6.2 | 4.0.6 | FE/DESC type | Gravitino 1.3 logical type | Spark representation | Projection and representative lane | Contract |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `BOOLEAN`, `TINYINT`, `SMALLINT`, `INT`, `BIGINT`, `FLOAT`, `DOUBLE`, `DECIMAL(p,s)`, `DATE`, `CHAR(n)`, `VARCHAR(n)`, `STRING`/`TEXT` | DDL, insert, and read | DDL, insert, and read | matching scalar family; `TEXT` stays `text` | matching typed scalar | typed Catalyst scalar | direct, native detail scan | `typed` |
+| `DATETIME(6)` | DDL, insert, and read | DDL, insert, and read | `datetime(6)` | timestamp without time zone | String | direct text, SQL scan | `String` |
+| `ARRAY<INT>`, `MAP<STRING,INT>`, `STRUCT<...>` | DDL, insert, and read | DDL, insert, and read | matching container family | JDBC-lossy scalar/String form | String | direct text, SQL scan | `String` |
+| `LARGEINT` | DDL, insert, and read | DDL, insert, and read | `largeint` | JDBC-lossy integer form | String | direct text, SQL scan | `String` |
+| `JSON`; `JSONB` probe | DDL, insert, and read | DDL, insert, and read | `json`; `JSONB` is normalized to `json` | `external(json)` | String | direct text, SQL scan | `String` |
+| `VARIANT`, `IPV4`, `IPV6` | DDL, insert, and read | DDL, insert, and read | matching Doris-specific family | external/generic metadata reconciled with the known FE family | String | direct text, SQL scan | `String` |
+| `BITMAP`, `HLL` | DDL, insert, and read | DDL, insert, and read | matching sketch family | JDBC-lossy external/String form | String | `BITMAP_TO_BASE64`/`HLL_TO_BASE64`, SQL scan | `base64` |
+| `DECIMAL(76,6)` | DDL rejected (`42000`/`1235`) | DDL, insert, and read after `enable_decimal256=true` | `decimal(76,6)` on 4.0.6 | `external(decimal(76,6))` | String | direct text, SQL scan on 4.0.6 | `probe-only` on 3.0.6.2; `String` on 4.0.6 |
+| `DECIMALV2(18,3)`, `DECIMAL32(9,2)`, `DECIMAL64(18,3)`, `DECIMAL128(38,6)` | DDL rejected (`HY000`/`1105`) | DDL rejected (`HY000`/`1105`) | none | none | none | none | `probe-only` |
+| `BINARY`, `VARBINARY`, `TIME`, `TINYINT UNSIGNED`, `SMALLINT UNSIGNED`, `INT UNSIGNED`, `BIGINT UNSIGNED` | DDL rejected (`HY000`/`1105`) | DDL rejected (`HY000`/`1105`) | none | none | none | none | `probe-only` |
+| Any unlisted or future FE type | no support inference | no support inference | unlisted | generic metadata is insufficient | none | fail closed | `unsupported` |
+
+The lane column describes the complete representative detail scan that contains the type, not an
+intrinsic per-column execution property. Projecting only lossless columns from a mixed table keeps
+the native lane. If any projected column needs String/base64 normalization, the complete scan uses
+the SQL lane and Spark retains authoritative predicates, grouping, aggregate inputs, and ordering
+on normalized columns.
+
+The matrix intentionally distinguishes Doris DDL acceptance from converter parsing. Unit tests
+keep regression coverage for provider parsing of metadata strings such as legacy decimal names,
+but a parser branch does not promote a DDL form into the certified read contract.
 
 ## macOS Docker routing
 

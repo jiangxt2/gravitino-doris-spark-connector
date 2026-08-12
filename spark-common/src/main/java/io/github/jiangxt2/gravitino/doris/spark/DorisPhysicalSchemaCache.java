@@ -61,12 +61,40 @@ public final class DorisPhysicalSchemaCache {
 
   /** Returns one schema, coalescing concurrent loads for the same identifier. */
   public DorisPhysicalSchema get(Identifier identifier, Supplier<DorisPhysicalSchema> loader) {
+    return getWithStatus(identifier, loader).schema();
+  }
+
+  /** Returns one schema and whether a retained entry existed before this lookup. */
+  Lookup getWithStatus(Identifier identifier, Supplier<DorisPhysicalSchema> loader) {
     Objects.requireNonNull(identifier, "identifier");
     Objects.requireNonNull(loader, "loader");
     if (!enabled) {
-      return Objects.requireNonNull(loader.get(), "physical schema loader returned null");
+      return new Lookup(load(loader), false);
     }
-    return cache.get(key(identifier), ignored -> loader.get());
+    String key = key(identifier);
+    DorisPhysicalSchema retained = cache.getIfPresent(key);
+    if (retained != null) {
+      return new Lookup(retained, true);
+    }
+    // A concurrent caller may complete or join this load. Either outcome still belongs to the
+    // current miss generation and must not be eligible for stale-entry revalidation.
+    return new Lookup(cache.get(key, ignored -> load(loader)), false);
+  }
+
+  /**
+   * Removes the expected snapshot, if it is still current, and returns one coalesced replacement.
+   */
+  DorisPhysicalSchema reloadIfSame(
+      Identifier identifier, DorisPhysicalSchema expected, Supplier<DorisPhysicalSchema> loader) {
+    Objects.requireNonNull(identifier, "identifier");
+    Objects.requireNonNull(expected, "expected");
+    Objects.requireNonNull(loader, "loader");
+    if (!enabled) {
+      return load(loader);
+    }
+    String key = key(identifier);
+    cache.asMap().remove(key, expected);
+    return cache.get(key, ignored -> load(loader));
   }
 
   /** Invalidates one table cache entry. */
@@ -81,6 +109,28 @@ public final class DorisPhysicalSchemaCache {
 
   private static String key(Identifier identifier) {
     return String.join("\u0000", identifier.namespace()) + "\u0000" + identifier.name();
+  }
+
+  private static DorisPhysicalSchema load(Supplier<DorisPhysicalSchema> loader) {
+    return Objects.requireNonNull(loader.get(), "physical schema loader returned null");
+  }
+
+  static final class Lookup {
+    private final DorisPhysicalSchema schema;
+    private final boolean cacheHit;
+
+    private Lookup(DorisPhysicalSchema schema, boolean cacheHit) {
+      this.schema = schema;
+      this.cacheHit = cacheHit;
+    }
+
+    DorisPhysicalSchema schema() {
+      return schema;
+    }
+
+    boolean cacheHit() {
+      return cacheHit;
+    }
   }
 
   private static long parseNonNegativeLong(

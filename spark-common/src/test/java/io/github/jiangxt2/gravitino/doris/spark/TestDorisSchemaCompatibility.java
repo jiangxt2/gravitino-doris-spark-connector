@@ -43,7 +43,7 @@ public class TestDorisSchemaCompatibility {
   private static final SparkTypeConverter TYPE_CONVERTER = new TestDorisTypeConverter();
 
   @Test
-  void testSupportedTypesAndDirectionalNormalization() {
+  void testPlansEvidenceBackedTypeFamilies() {
     Column[] logicalColumns =
         new Column[] {
           column("bool_col", Types.BooleanType.get(), null, true),
@@ -112,7 +112,19 @@ public class TestDorisSchemaCompatibility {
 
     DorisReadSchema result =
         DorisSchemaCompatibility.planReadSchema(
-            IDENTIFIER, table(logicalColumns), physicalSchema, TYPE_CONVERTER);
+            IDENTIFIER,
+            table(logicalColumns),
+            new DorisPhysicalSchema(
+                physicalSchema,
+                Arrays.asList(
+                    "DATETIME(6)",
+                    "BINARY",
+                    "JSON",
+                    "BITMAP",
+                    "HLL",
+                    "INT UNSIGNED",
+                    "ARRAY<INT>")),
+            TYPE_CONVERTER);
 
     assertTrue(result.requiresSqlExecution());
     assertEquals(
@@ -243,8 +255,7 @@ public class TestDorisSchemaCompatibility {
           column("struct_col", Types.StringType.get(), null, true),
           column("large_col", Types.IntegerType.get(), null, true),
           column("bitmap_col", Types.ExternalType.of("BIT"), null, true),
-          column("hll_col", Types.StringType.get(), null, true),
-          column("future_col", Types.ExternalType.of("UNKNOWN"), null, true)
+          column("hll_col", Types.StringType.get(), null, true)
         };
     StructType physicalSchema =
         schema(
@@ -253,8 +264,7 @@ public class TestDorisSchemaCompatibility {
             field("struct_col", DataTypes.StringType, true),
             field("large_col", DataTypes.StringType, true),
             field("bitmap_col", DataTypes.StringType, true),
-            field("hll_col", DataTypes.StringType, true),
-            field("future_col", DataTypes.StringType, true));
+            field("hll_col", DataTypes.StringType, true));
 
     DorisReadSchema result =
         DorisSchemaCompatibility.planReadSchema(
@@ -262,8 +272,7 @@ public class TestDorisSchemaCompatibility {
             table(logicalColumns),
             new DorisPhysicalSchema(
                 physicalSchema,
-                Arrays.asList(
-                    "ARRAY", "MAP", "STRUCT", "LARGEINT", "BITMAP", "HLL", "FUTURE_TYPE")),
+                Arrays.asList("ARRAY", "MAP", "STRUCT", "LARGEINT", "BITMAP", "HLL")),
             TYPE_CONVERTER);
 
     assertTrue(result.requiresSqlExecution());
@@ -274,9 +283,49 @@ public class TestDorisSchemaCompatibility {
             "`struct_col` AS `struct_col`",
             "`large_col` AS `large_col`",
             "BITMAP_TO_BASE64(`bitmap_col`) AS `bitmap_col`",
-            "HLL_TO_BASE64(`hll_col`) AS `hll_col`",
-            "`future_col` AS `future_col`"),
+            "HLL_TO_BASE64(`hll_col`) AS `hll_col`"),
         result.projections());
+
+    assertIncompatible(
+        new Column[] {column("future_col", Types.ExternalType.of("UNKNOWN"), null, true)},
+        new DorisPhysicalSchema(
+            schema(field("future_col", DataTypes.StringType, true)), Arrays.asList("FUTURE_TYPE")));
+  }
+
+  @Test
+  void testPlansWithoutFeTypeNamesConservatively() {
+    Column[] supported =
+        new Column[] {
+          column("id", Types.IntegerType.get(), null, true),
+          column("event_time", Types.TimestampType.withoutTimeZone(6), null, true),
+          column("payload", Types.BinaryType.get(), null, true)
+        };
+    DorisReadSchema result =
+        DorisSchemaCompatibility.planReadSchema(
+            IDENTIFIER,
+            table(supported),
+            schema(
+                field("id", DataTypes.IntegerType, true),
+                field("event_time", DataTypes.TimestampType, true),
+                field("payload", DataTypes.BinaryType, true)),
+            TYPE_CONVERTER);
+
+    assertTrue(result.requiresSqlExecution());
+    assertEquals(
+        Arrays.asList("`id`", "`event_time` AS `event_time`", "TO_BASE64(`payload`) AS `payload`"),
+        result.projections());
+
+    assertIncompatible(
+        new Column[] {column("value", Types.ExternalType.of("JSON"), null, true)},
+        schema(field("value", DataTypes.StringType, true)));
+    assertIncompatible(
+        new Column[] {
+          column("value", Types.ListType.of(Types.IntegerType.get(), true), null, true)
+        },
+        schema(field("value", DataTypes.createArrayType(DataTypes.IntegerType), true)));
+    assertIncompatible(
+        new Column[] {column("value", Types.IntegerType.unsigned(), null, true)},
+        schema(field("value", DataTypes.LongType, true)));
   }
 
   @Test
@@ -378,7 +427,7 @@ public class TestDorisSchemaCompatibility {
   }
 
   @Test
-  void testRejectsStructuralAndNullabilityMismatches() {
+  void testRejectsDirectionalSchemaDrift() {
     Column logical = column("id", Types.IntegerType.get(), null, true);
 
     assertIncompatible(new Column[] {logical}, new StructType());

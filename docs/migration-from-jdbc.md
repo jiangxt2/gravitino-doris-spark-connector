@@ -9,7 +9,7 @@
 | Detail scan | JDBC partitions only when configured | Native Doris tablet scan for lossless scalar projections |
 | Aggregate and Top-N | Spark JDBC V2 pushdown | Same Spark JDBC V2 planner through the SQL lane |
 | JDBC partition/fetch controls | Standard Spark options | Same controls exposed as governed catalog properties |
-| Doris-specific types | JDBC metadata may be lossy or unsupported | FE-aware String/base64 normalization avoids whole-table rejection |
+| Doris-specific types | JDBC metadata may be lossy or unsupported | FE-aware String/base64 normalization for the explicit two-version matrix; unlisted types fail closed |
 | DATETIME | JDBC/Catalyst conversion may depend on time zone | Doris text representation remains stable across Spark session time zones |
 | Schema drift | Physical schema only | Directional comparison with governed Gravitino metadata |
 | Writes and DDL | Provider-dependent | Explicitly rejected in the initial release |

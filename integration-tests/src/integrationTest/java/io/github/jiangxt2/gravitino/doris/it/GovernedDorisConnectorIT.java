@@ -68,14 +68,18 @@ import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.MethodOrderer;
+import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.TestMethodOrder;
 import org.junit.jupiter.api.function.Executable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /** End-to-end verification against real Gravitino, Spark, and Doris components. */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
+@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 public class GovernedDorisConnectorIT {
 
   private static final Logger LOG = LoggerFactory.getLogger(GovernedDorisConnectorIT.class);
@@ -86,6 +90,11 @@ public class GovernedDorisConnectorIT {
   private static final String DIRECT_DENIAL_CATALOG = "governed_doris_direct_denial";
   private static final String SQL_DENIAL_CATALOG = "governed_doris_sql_denial";
   private static final String JDBC_BASELINE_CATALOG = "direct_doris_jdbc";
+  private static final String STRICT_CATALOG = "governed_doris_strict";
+  private static final String STRICT_PARTITIONED_CATALOG = "governed_doris_strict_partitioned";
+  private static final String STRICT_RECORDER_CONTROL_CATALOG =
+      "governed_doris_strict_recorder_control";
+  private static final String STRICT_DENIAL_CATALOG = "governed_doris_strict_denial";
   private static final String PROVIDER = "doris-governed";
   private static final String SCHEMA = "connector_it";
   private static final String COMMON_TABLE = "common_types";
@@ -142,6 +151,10 @@ public class GovernedDorisConnectorIT {
   private RecordingDorisHttpProxy feProxy;
   private RecordingDorisTcpProxy tcpProxy;
   private GravitinoTestServer gravitino;
+  private TlsTestCertificates tlsCertificates;
+  private String originalTrustStore;
+  private String originalTrustStoreType;
+  private boolean trustStoreConfigured;
   private GravitinoAdminClient adminClient;
   private GravitinoMetalake metalake;
   private GravitinoClient governedClient;
@@ -161,6 +174,8 @@ public class GovernedDorisConnectorIT {
     Path installedDriverDirectory =
         Paths.get(requiredSystemProperty("connector.installed.jdbc.driver.directory"))
             .toAbsolutePath();
+    Path tlsFixtureDirectory =
+        Paths.get(requiredSystemProperty("connector.tls.fixture.directory")).toAbsolutePath();
     assertThat(jdbcDriver).isRegularFile();
     assertThat(jdbcDriver.normalize().startsWith(providerDirectory.normalize())).isFalse();
     assertThat(externalDriverDirectory).isDirectory().isEmptyDirectory();
@@ -174,15 +189,19 @@ public class GovernedDorisConnectorIT {
 
     try {
       network = DockerTestNetwork.create();
-      doris = new DorisTestCluster(network, version, repositoryRoot);
+      tlsCertificates = TlsTestCertificates.prepare(tlsFixtureDirectory);
+      doris = new DorisTestCluster(network, version, repositoryRoot, tlsCertificates);
       doris.start();
+      configureSparkTrustStore(tlsCertificates.clientTrustStore());
       feProxy = RecordingDorisHttpProxy.start(doris.hostFeEndpoint());
       tcpProxy = new RecordingDorisTcpProxy(network);
       tcpProxy.start();
       createPhysicalTables();
 
       verifyMissingServerDriverFailsBeforeDorisIo(providerDirectory, externalDriverDirectory);
-      gravitino = new GravitinoTestServer(network, providerDirectory, installedDriverDirectory);
+      gravitino =
+          new GravitinoTestServer(
+              network, providerDirectory, installedDriverDirectory, tlsCertificates);
       gravitino.start();
       createGovernedMetadata();
       startSpark();
@@ -208,9 +227,11 @@ public class GovernedDorisConnectorIT {
     closeQuietly(feProxy);
     closeQuietly(doris);
     closeQuietly(network);
+    restoreSparkTrustStore();
   }
 
   @Test
+  @Order(1)
   void recordsTypeContractForCurrentDorisVersion() throws Exception {
     Catalog catalog = governedClient.loadCatalog(CATALOG);
     assertThat(catalog.properties()).doesNotContainKeys("jdbc-user", "jdbc-password");
@@ -651,6 +672,7 @@ public class GovernedDorisConnectorIT {
   }
 
   @Test
+  @Order(80)
   void rejectsUnsafeCatalogConfigurationWithoutObservedDorisIo() {
     RecordingDorisTcpProxy.State reset = resetDeniedIoRecorders();
     String maliciousSecret = "catalog-security-secret-canary";
@@ -710,6 +732,132 @@ public class GovernedDorisConnectorIT {
           .hasMessageNotContaining(properties.get("jdbc-url"));
     }
     assertDeniedIoRemainsZero(reset.generation());
+  }
+
+  @Test
+  @Order(90)
+  void strictJdbcTlsMatchesVerifiedDirectJdbcAndNeverUsesFeHttp() throws Exception {
+    feProxy.reset();
+    Dataset<Row> detail =
+        spark.sql(
+            "SELECT id, label FROM "
+                + qualified(STRICT_CATALOG, COMMON_TABLE)
+                + " WHERE id >= 2 ORDER BY id LIMIT 3 OFFSET 1");
+    assertThat(sparkRows(detail))
+        .containsExactlyElementsOf(
+            verifiedJdbcRows(
+                doris.hostStrictJdbcUrl(),
+                "SELECT id, label FROM `"
+                    + SCHEMA
+                    + "`.`"
+                    + COMMON_TABLE
+                    + "` WHERE id >= 2 ORDER BY id LIMIT 3 OFFSET 1"));
+    assertThat(detail.queryExecution().executedPlan().toString())
+        .contains("JDBCScan")
+        .doesNotContain("DorisScanV2");
+
+    Dataset<Row> aggregate =
+        spark.sql(
+            "SELECT code, COUNT(*), SUM(amount) FROM "
+                + qualified(STRICT_CATALOG, COMMON_TABLE)
+                + " GROUP BY code");
+    assertThat(sorted(sparkRows(aggregate)))
+        .isEqualTo(
+            sorted(
+                verifiedJdbcRows(
+                    doris.hostStrictJdbcUrl(),
+                    "SELECT code, COUNT(*), SUM(amount) FROM `"
+                        + SCHEMA
+                        + "`.`"
+                        + COMMON_TABLE
+                        + "` GROUP BY code")));
+    assertThat(aggregate.queryExecution().executedPlan().toString())
+        .contains("PushedAggregates")
+        .doesNotContain("DorisScanV2");
+
+    Dataset<Row> partitioned =
+        spark
+            .table(qualified(STRICT_PARTITIONED_CATALOG, PARTITIONED_TABLE))
+            .select("id", "event_time");
+    assertThat(partitioned.rdd().getNumPartitions()).isEqualTo(4);
+    assertThat(sorted(sparkRows(partitioned)))
+        .isEqualTo(
+            sorted(
+                verifiedJdbcRows(
+                    doris.hostStrictJdbcUrl(),
+                    "SELECT id, event_time FROM `" + SCHEMA + "`.`" + PARTITIONED_TABLE + "`")));
+    assertThat(feProxy.totalRequestCount()).isZero();
+  }
+
+  @Test
+  @Order(91)
+  void strictAuthorizationDenialPrecedesJdbcAndFeHttpIo() {
+    SparkSession deniedSession = spark.newSession();
+    CatalogManager manager = deniedSession.sessionState().catalogManager();
+    RecordingDorisTcpProxy.State reset = resetDeniedIoRecorders();
+    try {
+      assertThatThrownBy(
+              () ->
+                  deniedSession
+                      .sql("SELECT * FROM " + qualified(STRICT_DENIAL_CATALOG, DENIED_TABLE))
+                      .collectAsList())
+          .hasMessageContaining("not authorized")
+          .hasMessageNotContaining(DorisTestCluster.TEST_PASSWORD);
+      assertDeniedIoRemainsZero(reset.generation());
+    } finally {
+      manager.reset();
+    }
+  }
+
+  @Test
+  @Order(92)
+  void strictTlsRejectsHostnameMismatchWithoutLeakingConnectionMaterial() {
+    String mismatchUrl = "jdbc:mysql://doris-fe-mismatch:9030/?sslMode=VERIFY_IDENTITY";
+    Map<String, String> mismatchProperties = strictCatalogProperties(false, mismatchUrl);
+    assertThatThrownBy(
+            () ->
+                metalake.testConnection(
+                    "strict_hostname_mismatch",
+                    Catalog.Type.RELATIONAL,
+                    PROVIDER,
+                    "Strict hostname mismatch must fail",
+                    mismatchProperties))
+        .isInstanceOf(RuntimeException.class)
+        .hasMessageNotContaining(mismatchUrl)
+        .hasMessageNotContaining(DorisTestCluster.TEST_PASSWORD);
+  }
+
+  @Test
+  @Order(Integer.MAX_VALUE - 2)
+  void strictTlsRejectsUnknownCa() {
+    doris.installUnknownCaCertificate();
+    String unknownCaUrl = doris.hostStrictJdbcUrl();
+    assertThatThrownBy(() -> verifiedJdbcRows(unknownCaUrl, "SELECT 1"))
+        .isInstanceOf(Exception.class)
+        .hasMessageNotContaining(unknownCaUrl)
+        .hasMessageNotContaining(DorisTestCluster.TEST_PASSWORD);
+  }
+
+  @Test
+  @Order(Integer.MAX_VALUE - 1)
+  void strictTlsRejectsExpiredServerCertificate() {
+    doris.installExpiredCertificate();
+    String expiredUrl = doris.hostStrictJdbcUrl();
+    assertThatThrownBy(() -> verifiedJdbcRows(expiredUrl, "SELECT 1"))
+        .isInstanceOf(Exception.class)
+        .hasMessageNotContaining(expiredUrl)
+        .hasMessageNotContaining(DorisTestCluster.TEST_PASSWORD);
+  }
+
+  @Test
+  @Order(Integer.MAX_VALUE)
+  void strictTlsRefusesPlaintextDowngrade() {
+    doris.disableTls();
+    String strictUrl = doris.hostStrictJdbcUrl();
+    assertThatThrownBy(() -> verifiedJdbcRows(strictUrl, "SELECT 1"))
+        .isInstanceOf(Exception.class)
+        .hasMessageNotContaining(strictUrl)
+        .hasMessageNotContaining(DorisTestCluster.TEST_PASSWORD);
   }
 
   private void verifyMissingServerDriverFailsBeforeDorisIo(
@@ -800,11 +948,17 @@ public class GovernedDorisConnectorIT {
   @SuppressWarnings("deprecation")
   void reloadsStaleSnapshotAndCompletesRefreshTable() throws Throwable {
     org.apache.spark.sql.connector.catalog.TableCatalog sparkCatalog = sparkCatalog(CATALOG);
+    org.apache.spark.sql.connector.catalog.TableCatalog strictSparkCatalog =
+        sparkCatalog(STRICT_CATALOG);
     Identifier identifier = Identifier.of(new String[] {SCHEMA}, DRIFT_TABLE);
     String qualifiedTable = "`" + SCHEMA + "`.`" + DRIFT_TABLE + "`";
     String path = schemaPath(DRIFT_TABLE);
     sparkCatalog.invalidateTable(identifier);
+    strictSparkCatalog.invalidateTable(identifier);
     feProxy.reset();
+    assertThat(strictSparkCatalog.loadTable(identifier).schema().fieldNames())
+        .containsExactly("id");
+    assertThat(feProxy.requestCount("GET", path)).isZero();
     assertThat(sparkCatalog.loadTable(identifier).schema().fieldNames()).containsExactly("id");
     assertThat(feProxy.requestCount("GET", path)).isEqualTo(1);
 
@@ -818,8 +972,15 @@ public class GovernedDorisConnectorIT {
           .atMost(Duration.ofSeconds(30))
           .untilAsserted(() -> assertThat(jdbcColumnTypes(DRIFT_TABLE)).containsKey("drifted"));
 
-      // Spark resolves the relation before invoking catalog invalidation. The cached mismatch
-      // therefore performs one conditional FE reload, after which REFRESH TABLE can complete.
+      // Spark resolves the relation before invoking catalog invalidation. Each transport must
+      // therefore replace its exact stale snapshot before REFRESH TABLE can complete. The strict
+      // path reloads JDBC metadata without opening the native FE HTTP schema path.
+      spark.sql("REFRESH TABLE " + qualified(STRICT_CATALOG, DRIFT_TABLE)).collectAsList();
+      assertThat(feProxy.requestCount("GET", path)).isEqualTo(1);
+      assertThat(strictSparkCatalog.loadTable(identifier).schema().fieldNames())
+          .containsExactly("id", "drifted");
+      assertThat(feProxy.requestCount("GET", path)).isEqualTo(1);
+
       spark.sql("REFRESH TABLE " + qualified(CATALOG, DRIFT_TABLE)).collectAsList();
       assertThat(feProxy.requestCount("GET", path)).isEqualTo(2);
       assertThat(sparkCatalog.loadTable(identifier).schema().fieldNames())
@@ -829,9 +990,22 @@ public class GovernedDorisConnectorIT {
       testFailure = failure;
       throw failure;
     } finally {
+      Throwable cleanupFailure = null;
       try {
         restoreDriftTable(sparkCatalog, identifier, qualifiedTable);
-      } catch (Throwable cleanupFailure) {
+      } catch (Throwable failure) {
+        cleanupFailure = failure;
+      }
+      try {
+        strictSparkCatalog.invalidateTable(identifier);
+      } catch (Throwable failure) {
+        if (cleanupFailure == null) {
+          cleanupFailure = failure;
+        } else {
+          cleanupFailure.addSuppressed(failure);
+        }
+      }
+      if (cleanupFailure != null) {
         if (testFailure != null) {
           testFailure.addSuppressed(cleanupFailure);
         } else {
@@ -844,19 +1018,34 @@ public class GovernedDorisConnectorIT {
   @Test
   void exposesOnlyBatchReadAndKeepsCredentialsOutOfPlansAndLogs() {
     org.apache.spark.sql.connector.catalog.TableCatalog catalog = sparkCatalog(CATALOG);
+    org.apache.spark.sql.connector.catalog.TableCatalog strictCatalog =
+        sparkCatalog(STRICT_CATALOG);
     Table table;
+    Table strictTable;
     try {
       table = catalog.loadTable(Identifier.of(new String[] {SCHEMA}, COMMON_TABLE));
+      strictTable = strictCatalog.loadTable(Identifier.of(new String[] {SCHEMA}, COMMON_TABLE));
     } catch (Exception e) {
       throw new AssertionError(e);
     }
     assertThat(table.capabilities()).containsExactly(TableCapability.BATCH_READ);
+    assertThat(strictTable.capabilities()).containsExactly(TableCapability.BATCH_READ);
     assertThat(table.properties()).doesNotContainKeys("jdbc-user", "jdbc-password");
+    assertThat(strictTable.properties()).doesNotContainKeys("jdbc-user", "jdbc-password");
 
     assertThatThrownBy(
             () ->
                 spark
                     .sql("INSERT INTO " + qualified(CATALOG, COMMON_TABLE) + " (id) VALUES (999)")
+                    .collectAsList())
+        .hasMessageContaining("read-only");
+    assertThatThrownBy(
+            () ->
+                spark
+                    .sql(
+                        "INSERT INTO "
+                            + qualified(STRICT_CATALOG, COMMON_TABLE)
+                            + " (id) VALUES (999)")
                     .collectAsList())
         .hasMessageContaining("read-only");
     assertThatThrownBy(
@@ -1080,6 +1269,22 @@ public class GovernedDorisConnectorIT {
             PROVIDER,
             "Governed Doris partitioned SQL-lane catalog",
             catalogProperties(true));
+    Catalog strictCatalog =
+        metalake.createCatalog(
+            STRICT_CATALOG,
+            Catalog.Type.RELATIONAL,
+            PROVIDER,
+            "Verified JDBC-only Doris integration catalog",
+            strictCatalogProperties(false, doris.internalStrictJdbcUrl()));
+    testVerifiedServerConnection(
+        "strict_server_connection", strictCatalogProperties(false, doris.internalStrictJdbcUrl()));
+    Catalog strictPartitionedCatalog =
+        metalake.createCatalog(
+            STRICT_PARTITIONED_CATALOG,
+            Catalog.Type.RELATIONAL,
+            PROVIDER,
+            "Verified JDBC-only partitioned integration catalog",
+            strictCatalogProperties(true, doris.internalStrictJdbcUrl()));
     Catalog recorderControlCatalog =
         metalake.createCatalog(
             RECORDER_CONTROL_CATALOG,
@@ -1087,6 +1292,16 @@ public class GovernedDorisConnectorIT {
             PROVIDER,
             "Governed Doris TCP recorder control catalog",
             recordingCatalogProperties(RecordingDorisTcpProxy.Lane.CONTROL));
+    Catalog strictRecorderControlCatalog =
+        metalake.createCatalog(
+            STRICT_RECORDER_CONTROL_CATALOG,
+            Catalog.Type.RELATIONAL,
+            PROVIDER,
+            "Verified JDBC-only recorder control catalog",
+            strictRecordingCatalogProperties(
+                false,
+                tcpProxy.jdbcUrl(RecordingDorisTcpProxy.Lane.CONTROL)
+                    + "?sslMode=VERIFY_IDENTITY"));
     metalake.createCatalog(
         DIRECT_DENIAL_CATALOG,
         Catalog.Type.RELATIONAL,
@@ -1099,9 +1314,20 @@ public class GovernedDorisConnectorIT {
         PROVIDER,
         "Fresh SQL authorization-denial catalog",
         recordingCatalogProperties(RecordingDorisTcpProxy.Lane.DENIAL));
+    metalake.createCatalog(
+        STRICT_DENIAL_CATALOG,
+        Catalog.Type.RELATIONAL,
+        PROVIDER,
+        "Fresh strict authorization-denial catalog",
+        strictRecordingCatalogProperties(
+            false,
+            tcpProxy.jdbcUrl(RecordingDorisTcpProxy.Lane.DENIAL) + "?sslMode=VERIFY_IDENTITY"));
     catalog.asSchemas().loadSchema(SCHEMA);
     partitionedCatalog.asSchemas().loadSchema(SCHEMA);
+    strictCatalog.asSchemas().loadSchema(SCHEMA);
+    strictPartitionedCatalog.asSchemas().loadSchema(SCHEMA);
     recorderControlCatalog.asSchemas().loadSchema(SCHEMA);
+    strictRecorderControlCatalog.asSchemas().loadSchema(SCHEMA);
 
     List<String> mainTables =
         new ArrayList<>(
@@ -1133,17 +1359,44 @@ public class GovernedDorisConnectorIT {
       }
     }
     partitionedCatalog.asTableCatalog().loadTable(NameIdentifier.of(SCHEMA, PARTITIONED_TABLE));
+    TableCatalog strictMainTableCatalog = strictCatalog.asTableCatalog();
+    mainTables.forEach(name -> strictMainTableCatalog.loadTable(NameIdentifier.of(SCHEMA, name)));
+    strictPartitionedCatalog
+        .asTableCatalog()
+        .loadTable(NameIdentifier.of(SCHEMA, PARTITIONED_TABLE));
     recorderControlCatalog.asTableCatalog().loadTable(NameIdentifier.of(SCHEMA, COMMON_TABLE));
+    strictRecorderControlCatalog
+        .asTableCatalog()
+        .loadTable(NameIdentifier.of(SCHEMA, COMMON_TABLE));
 
     metalake.addUser(READER);
     List<SecurableObject> grants = new ArrayList<>();
     addReadGrants(grants, CATALOG, mainTables, DENIED_TABLE);
     addReadGrants(grants, PARTITIONED_CATALOG, Collections.singletonList(PARTITIONED_TABLE), null);
+    addReadGrants(grants, STRICT_CATALOG, mainTables, DENIED_TABLE);
+    addReadGrants(
+        grants, STRICT_PARTITIONED_CATALOG, Collections.singletonList(PARTITIONED_TABLE), null);
     addReadGrants(grants, RECORDER_CONTROL_CATALOG, Collections.singletonList(COMMON_TABLE), null);
+    addReadGrants(
+        grants, STRICT_RECORDER_CONTROL_CATALOG, Collections.singletonList(COMMON_TABLE), null);
     addReadGrants(grants, DIRECT_DENIAL_CATALOG, Collections.emptyList(), null);
     addReadGrants(grants, SQL_DENIAL_CATALOG, Collections.emptyList(), null);
+    addReadGrants(grants, STRICT_DENIAL_CATALOG, Collections.emptyList(), null);
     metalake.createRole(READER_ROLE, new HashMap<>(), grants);
     metalake.grantRolesToUser(ImmutableList.of(READER_ROLE), READER);
+  }
+
+  private void testVerifiedServerConnection(String catalogName, Map<String, String> properties) {
+    try {
+      metalake.testConnection(
+          catalogName,
+          Catalog.Type.RELATIONAL,
+          PROVIDER,
+          "Verify Gravitino Server JDBC TLS",
+          properties);
+    } catch (Exception e) {
+      throw new IllegalStateException("Gravitino Server strict JDBC TLS verification failed", e);
+    }
   }
 
   private Map<String, String> catalogProperties(boolean partitioned) {
@@ -1174,6 +1427,33 @@ public class GovernedDorisConnectorIT {
 
   private Map<String, String> recordingCatalogProperties(RecordingDorisTcpProxy.Lane lane) {
     Map<String, String> properties = catalogProperties(false, tcpProxy.jdbcUrl(lane));
+    properties.put("gravitino.bypass.maxIdle", "0");
+    return properties;
+  }
+
+  private Map<String, String> strictCatalogProperties(boolean partitioned, String verifiedJdbcUrl) {
+    Map<String, String> properties = new HashMap<>();
+    properties.put("jdbc-url", verifiedJdbcUrl);
+    properties.put("jdbc-driver", "com.mysql.cj.jdbc.Driver");
+    properties.put("jdbc-user", DorisTestCluster.TEST_USER);
+    properties.put("jdbc-password", DorisTestCluster.TEST_PASSWORD);
+    properties.put("credential-providers", "jdbc-user-password");
+    properties.put("doris-read-transport", "strict-jdbc-tls");
+    properties.put("doris-schema-cache-ttl-ms", "60000");
+    properties.put("doris-schema-cache-max-entries", "64");
+    if (partitioned) {
+      properties.put("doris-jdbc-partition-column", "id");
+      properties.put("doris-jdbc-lower-bound", "1");
+      properties.put("doris-jdbc-upper-bound", "10001");
+      properties.put("doris-jdbc-num-partitions", "4");
+      properties.put("doris-jdbc-fetch-size", "32");
+    }
+    return properties;
+  }
+
+  private Map<String, String> strictRecordingCatalogProperties(
+      boolean partitioned, String verifiedJdbcUrl) {
+    Map<String, String> properties = strictCatalogProperties(partitioned, verifiedJdbcUrl);
     properties.put("gravitino.bypass.maxIdle", "0");
     return properties;
   }
@@ -1217,6 +1497,31 @@ public class GovernedDorisConnectorIT {
                   assertThat(tcpProxy.state(RecordingDorisTcpProxy.Lane.CONTROL).active())
                       .as("positive-control JDBC connections must close before denial tests")
                       .isZero());
+
+      long strictAcceptedBeforeSpark =
+          tcpProxy.state(RecordingDorisTcpProxy.Lane.CONTROL).accepted();
+      feProxy.reset();
+      controlSession
+          .table(qualified(STRICT_RECORDER_CONTROL_CATALOG, COMMON_TABLE))
+          .select("id")
+          .collectAsList();
+      assertThat(feProxy.totalRequestCount())
+          .as("strict physical schema and reads must not use FE HTTP")
+          .isZero();
+      await()
+          .atMost(Duration.ofSeconds(5))
+          .untilAsserted(
+              () ->
+                  assertThat(tcpProxy.state(RecordingDorisTcpProxy.Lane.CONTROL).accepted())
+                      .as("strict Spark schema and reads must traverse JDBC TCP")
+                      .isGreaterThan(strictAcceptedBeforeSpark));
+      await()
+          .atMost(Duration.ofSeconds(5))
+          .untilAsserted(
+              () ->
+                  assertThat(tcpProxy.state(RecordingDorisTcpProxy.Lane.CONTROL).active())
+                      .as("strict JDBC connections must close after the positive control")
+                      .isZero());
     } finally {
       controlManager.reset();
     }
@@ -1247,7 +1552,7 @@ public class GovernedDorisConnectorIT {
             .config(
                 jdbcCatalogPrefix,
                 "org.apache.spark.sql.execution.datasources.v2.jdbc.JDBCTableCatalog")
-            .config(jdbcCatalogPrefix + ".url", doris.internalJdbcUrl())
+            .config(jdbcCatalogPrefix + ".url", doris.internalStrictJdbcUrl())
             .config(jdbcCatalogPrefix + ".driver", "com.mysql.cj.jdbc.Driver")
             .config(jdbcCatalogPrefix + ".user", DorisTestCluster.TEST_USER)
             .config(jdbcCatalogPrefix + ".password", DorisTestCluster.TEST_PASSWORD)
@@ -1474,6 +1779,53 @@ public class GovernedDorisConnectorIT {
       }
     }
     return rows;
+  }
+
+  private List<String> verifiedJdbcRows(String jdbcUrl, String sql) throws Exception {
+    List<String> rows = new ArrayList<>();
+    try (Connection connection =
+            DriverManager.getConnection(
+                jdbcUrl, DorisTestCluster.TEST_USER, DorisTestCluster.TEST_PASSWORD);
+        Statement statement = connection.createStatement();
+        ResultSet resultSet = statement.executeQuery(sql)) {
+      ResultSetMetaData metadata = resultSet.getMetaData();
+      while (resultSet.next()) {
+        List<String> values = new ArrayList<>(metadata.getColumnCount());
+        for (int index = 1; index <= metadata.getColumnCount(); index++) {
+          String value = resultSet.getString(index);
+          values.add(value == null ? NULL_VALUE : value);
+        }
+        rows.add(String.join(",", values));
+      }
+    }
+    return rows;
+  }
+
+  private void configureSparkTrustStore(Path trustStore) {
+    originalTrustStore = System.getProperty("javax.net.ssl.trustStore");
+    originalTrustStoreType = System.getProperty("javax.net.ssl.trustStoreType");
+    trustStoreConfigured = true;
+    System.setProperty("javax.net.ssl.trustStore", trustStore.toAbsolutePath().toString());
+    System.setProperty("javax.net.ssl.trustStoreType", "JKS");
+  }
+
+  private void restoreSparkTrustStore() {
+    if (!trustStoreConfigured) {
+      return;
+    }
+    setOrClearTrustStoreProperty("javax.net.ssl.trustStore", originalTrustStore);
+    setOrClearTrustStoreProperty("javax.net.ssl.trustStoreType", originalTrustStoreType);
+    originalTrustStore = null;
+    originalTrustStoreType = null;
+    trustStoreConfigured = false;
+  }
+
+  private static void setOrClearTrustStoreProperty(String name, String value) {
+    if (value == null) {
+      System.clearProperty(name);
+    } else {
+      System.setProperty(name, value);
+    }
   }
 
   private static List<String> sparkRows(Dataset<Row> frame) {

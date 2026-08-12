@@ -14,6 +14,7 @@
 
 package io.github.jiangxt2.gravitino.doris.spark;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -21,11 +22,29 @@ import static org.mockito.Mockito.mockStatic;
 import java.util.Set;
 import org.apache.gravitino.spark.connector.catalog.GravitinoCatalogManager;
 import org.apache.spark.sql.connector.catalog.Identifier;
+import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
 
 /** Tests Spark 3.5 patch compatibility behavior of the governed Doris catalog. */
 public class TestGovernedDorisCatalogSpark35 {
+
+  @Test
+  void testReadTransportCreatesStructurallySeparateCatalogs() {
+    GravitinoCatalogManager manager = mock(GravitinoCatalogManager.class);
+
+    try (MockedStatic<GravitinoCatalogManager> managers =
+        mockStatic(GravitinoCatalogManager.class)) {
+      managers.when(GravitinoCatalogManager::get).thenReturn(manager);
+      ExposedCatalog catalog = new ExposedCatalog();
+      TableCatalog hybrid = catalog.create(DorisReadTransport.HYBRID);
+      TableCatalog strict = catalog.create(DorisReadTransport.STRICT_JDBC_TLS);
+
+      assertThat(hybrid).isInstanceOf(SchemaSeededDorisTableCatalog35.class);
+      assertThat(strict).isExactlyInstanceOf(JdbcOnlyTableCatalog35.class);
+      assertThat(strict).isNotInstanceOf(org.apache.doris.spark.catalog.DorisTableCatalog.class);
+    }
+  }
 
   @Test
   void testWriteAwareLoadIsRejectedBeforeAdapterInitialization() {
@@ -42,6 +61,13 @@ public class TestGovernedDorisCatalogSpark35 {
           .isInstanceOf(UnsupportedOperationException.class)
           .hasMessageContaining("read-only")
           .hasMessageContaining("table writes");
+    }
+  }
+
+  private static final class ExposedCatalog extends GovernedDorisCatalogSpark35 {
+
+    private TableCatalog create(DorisReadTransport transport) {
+      return createDorisTableCatalog(transport);
     }
   }
 }

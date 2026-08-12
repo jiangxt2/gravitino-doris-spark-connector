@@ -320,6 +320,9 @@ public final class DorisSchemaCompatibility {
       Type type, DataType physicalType, String dorisTypeName) {
     String baseType = dorisBaseType(dorisTypeName);
     if (!baseType.isEmpty()) {
+      if ("bit".equals(baseType)) {
+        return !(type instanceof Types.BooleanType && DataTypes.BooleanType.equals(physicalType));
+      }
       if (isExternalDecimal(baseType) && !(physicalType instanceof DecimalType)) {
         // Connector 26.0.0 cannot construct a Catalyst DecimalType above Spark's precision limit.
         // This includes legacy Doris decimal family names, not only DECIMAL256.

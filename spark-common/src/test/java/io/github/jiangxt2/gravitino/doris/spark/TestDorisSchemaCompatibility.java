@@ -89,6 +89,28 @@ public class TestDorisSchemaCompatibility {
   }
 
   @Test
+  void testAcceptsJdbcBitOnlyForBooleanExecutionType() {
+    Column[] logicalColumns =
+        new Column[] {column("bool_col", Types.BooleanType.get(), null, true)};
+    DorisPhysicalSchema jdbcBitSchema =
+        new DorisPhysicalSchema(
+            schema(field("bool_col", DataTypes.BooleanType, true)), Arrays.asList("BIT"));
+
+    DorisReadSchema result =
+        DorisSchemaCompatibility.planReadSchema(
+            IDENTIFIER, table(logicalColumns), jdbcBitSchema, TYPE_CONVERTER);
+
+    assertFalse(result.requiresSqlExecution());
+    assertEquals(DataTypes.BooleanType, result.schema().apply("bool_col").dataType());
+    assertIncompatible(
+        new Column[] {column("bool_col", Types.ByteType.get(), null, true)}, jdbcBitSchema);
+    assertIncompatible(
+        logicalColumns,
+        new DorisPhysicalSchema(
+            schema(field("bool_col", DataTypes.BinaryType, true)), Arrays.asList("BIT")));
+  }
+
+  @Test
   void testNormalizesDatetimeBinaryComplexAndExternalTypesToStrings() {
     Column[] logicalColumns =
         new Column[] {

@@ -31,6 +31,16 @@ PRIORITY_NETWORKS=$(echo "${CONTAINER_IP}" | awk -F '.' '{print$1"."$2"."$3".0/2
 echo "add priority_networks = ${PRIORITY_NETWORKS} to fe.conf"
 echo "priority_networks = ${PRIORITY_NETWORKS}" >> ${DORIS_FE_HOME}/conf/fe.conf
 
+if [ "${GOVERNED_DORIS_ENABLE_TLS:-false}" = "true" ]; then
+  echo "enable_ssl = true" >> ${DORIS_FE_HOME}/conf/fe.conf
+  echo "ssl_force_client_auth = false" >> ${DORIS_FE_HOME}/conf/fe.conf
+  echo "ssl_trust_store_type = PKCS12" >> ${DORIS_FE_HOME}/conf/fe.conf
+  echo "mysql_ssl_default_ca_certificate = /opt/apache-doris/tls-fixture/ca-certificate.p12" >> ${DORIS_FE_HOME}/conf/fe.conf
+  echo "mysql_ssl_default_server_certificate = /opt/apache-doris/tls-fixture/server_certificate.p12" >> ${DORIS_FE_HOME}/conf/fe.conf
+  echo "mysql_ssl_default_ca_certificate_password = doris-it" >> ${DORIS_FE_HOME}/conf/fe.conf
+  echo "mysql_ssl_default_server_certificate_password = doris-it" >> ${DORIS_FE_HOME}/conf/fe.conf
+fi
+
 # Start only FE in daemon mode
 ${DORIS_FE_HOME}/bin/start_fe.sh --daemon
 

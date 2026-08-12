@@ -29,9 +29,15 @@ public final class DorisJdbcSecurity {
 
   private static final String JDBC_URL = "jdbc-url";
   private static final String JDBC_DRIVER = "jdbc-driver";
+  public static final String READ_TRANSPORT = "doris-read-transport";
+  public static final String HYBRID_TRANSPORT = "hybrid";
+  public static final String STRICT_JDBC_TLS_TRANSPORT = "strict-jdbc-tls";
+  public static final String DORIS_FE_NODES = "doris-fenodes";
+  public static final String DORIS_QUERY_PORT = "doris-query-port";
   private static final String MYSQL_DRIVER = "com.mysql.cj.jdbc.Driver";
   private static final String MYSQL_URL_PREFIX = "jdbc:mysql://";
   private static final String BYPASS_PREFIX = "gravitino.bypass.";
+  private static final String SPARK_BYPASS_PREFIX = "spark.bypass.";
   private static final String CONNECTION_PROPERTIES = "connectionproperties";
   private static final int MAX_DECODE_PASSES = 5;
 
@@ -44,7 +50,72 @@ public final class DorisJdbcSecurity {
           "detectCustomCollations",
           "allowLoadLocalInfile",
           "allowUrlInLocalInfile",
-          "allowLoadLocalInfileInPath");
+          "allowLoadLocalInfileInPath",
+          // Connector/J 8.0.33 class-loading and transport-rewrite parameters: after this
+          // validator returns, these can instantiate arbitrary classes or replace endpoint, TLS,
+          // or authentication behavior, breaking the verified transport contract.
+          "propertiesTransform",
+          "socketFactory",
+          "protocol",
+          "connectionLifecycleInterceptors",
+          "exceptionInterceptors",
+          "profilerEventHandler",
+          "clientInfoProvider",
+          "serverConfigCacheFactory",
+          "queryInfoCacheFactory",
+          "parseInfoCacheFactory",
+          "logger",
+          "useConfigs",
+          "defaultAuthenticationPlugin",
+          "disabledAuthenticationPlugins",
+          "authenticationPlugins",
+          "authenticationFidoCallbackHandler",
+          "loadBalanceExceptionChecker",
+          "dnsSrv",
+          // Connector/J 8.0.33 exposes these as ha.loadBalanceStrategy/ha.enableJMX with the
+          // haLoadBalanceStrategy/haEnableJMX aliases; there is no bare loadBalanceStrategy key.
+          "ha.loadBalanceStrategy",
+          "haLoadBalanceStrategy",
+          "ha.enableJMX",
+          "haEnableJMX",
+          // Client keystore material is a persistent secret and a keystore-loading sink; the
+          // strict profile never needs it because mTLS client authentication is out of scope.
+          "clientCertificateKeyStoreUrl",
+          "clientCertificateKeyStoreType",
+          "clientCertificateKeyStorePassword",
+          "fallbackToSystemKeyStore",
+          "serverRSAPublicKeyFile",
+          "ociConfigFile",
+          "ociConfigProfile",
+          "ldapServerHostname",
+          "allowPublicKeyRetrieval",
+          "localSocketAddress",
+          // These diagnostic switches can copy complete SQL text, protocol packets, or process
+          // thread state into logs, stderr, or exception text outside the connector's redaction
+          // boundary.
+          "autoGenerateTestcaseScript",
+          "dumpQueriesOnException",
+          "enablePacketDebug",
+          "explainSlowQueries",
+          "includeInnodbStatusInDeadlockExceptions",
+          "includeThreadDumpInDeadlockExceptions",
+          "includeThreadNamesAsStatementComment",
+          "gatherPerfMetrics",
+          "logXaCommands",
+          "logSlowQueries",
+          "profileSQL",
+          "traceProtocol",
+          "useUsageAdvisor",
+          // Setting socksProxyHost alone makes ConnectionImpl rewrite socketFactory to
+          // SocksProxySocketFactory, so the proxy family must be rejected with the factory it
+          // can replace. createDatabaseIfNotExist and sessionVariables execute DDL or
+          // SET SESSION statements during connection initialization (NativeProtocol), outside
+          // the read-only capability boundary.
+          "socksProxyHost",
+          "socksProxyPort",
+          "socksProxyRemoteDns",
+          "createDatabaseIfNotExist",
+          "sessionVariables");
 
   private static final Map<String, String> UNSAFE_POOL_PROPERTIES =
       normalizedNames(
@@ -61,9 +132,28 @@ public final class DorisJdbcSecurity {
           "password",
           "initialSize");
 
-  private static final Set<String> CREDENTIAL_PARAMETERS = Set.of("user", "username", "password");
+  private static final Set<String> CREDENTIAL_PARAMETERS =
+      Set.of("user", "username", "password", "password1", "password2", "password3");
   private static final Set<String> PROTECTED_BYPASS_PROPERTIES =
-      Set.of(JDBC_URL, JDBC_DRIVER, "jdbc-user", "jdbc-password");
+      Set.of(JDBC_URL, JDBC_DRIVER, "jdbc-user", "jdbc-password", READ_TRANSPORT);
+  private static final Set<String> CANONICAL_PROFILE_PROPERTIES =
+      Set.of(
+          JDBC_URL,
+          JDBC_DRIVER,
+          "jdbc-user",
+          "jdbc-password",
+          READ_TRANSPORT,
+          DORIS_FE_NODES,
+          DORIS_QUERY_PORT);
+
+  private static final Set<String> STRICT_TLS_REJECTED_PARAMETERS =
+      Set.of(
+          "trustcertificatekeystoreurl",
+          "trustcertificatekeystorepassword",
+          "trustcertificatekeystoretype",
+          "usessl",
+          "requiressl",
+          "verifyservercertificate");
 
   private DorisJdbcSecurity() {}
 
@@ -77,10 +167,22 @@ public final class DorisJdbcSecurity {
    *     security contract
    */
   public static void validateConnection(String url, String driver) {
+    validateConnection(url, driver, HYBRID_TRANSPORT);
+  }
+
+  /**
+   * Validates a canonical Doris JDBC connection for the selected read transport.
+   *
+   * @param url canonical JDBC URL
+   * @param driver canonical JDBC driver class name
+   * @param readTransport governed read transport value
+   */
+  public static void validateConnection(String url, String driver, String readTransport) {
     if (!MYSQL_DRIVER.equals(driver)) {
       throw new IllegalArgumentException("Doris JDBC driver must be com.mysql.cj.jdbc.Driver");
     }
-    validateUrl(url);
+    String transport = validateReadTransport(readTransport);
+    validateUrl(url, STRICT_JDBC_TLS_TRANSPORT.equals(transport));
   }
 
   /**
@@ -93,22 +195,88 @@ public final class DorisJdbcSecurity {
     if (properties == null) {
       throw new IllegalArgumentException("Doris JDBC catalog properties are required");
     }
-    validateConnection(properties.get(JDBC_URL), properties.get(JDBC_DRIVER));
-
+    Set<String> seenCanonicalProperties = new java.util.HashSet<>();
     for (Map.Entry<String, String> entry : properties.entrySet()) {
       String rawName = entry.getKey();
       if (rawName == null || rawName.isEmpty()) {
         throw new IllegalArgumentException("JDBC property name is invalid");
       }
       String decodedName = stableDecode(rawName, "JDBC property name encoding is invalid");
-      validatePropertyName(decodedName, entry.getValue(), true);
+      String normalizedName = decodedName.toLowerCase(Locale.ROOT);
+      if (CANONICAL_PROFILE_PROPERTIES.contains(normalizedName)) {
+        if (!rawName.equals(normalizedName) || !seenCanonicalProperties.add(normalizedName)) {
+          throw new IllegalArgumentException(
+              "Catalog property '" + normalizedName + "' must use its canonical name once");
+        }
+      }
+    }
+
+    String readTransport = readTransport(properties);
+    boolean strictTransport = STRICT_JDBC_TLS_TRANSPORT.equals(readTransport);
+    validateConnection(properties.get(JDBC_URL), properties.get(JDBC_DRIVER), readTransport);
+    validateTransportProperties(properties, strictTransport);
+
+    for (Map.Entry<String, String> entry : properties.entrySet()) {
+      String decodedName = stableDecode(entry.getKey(), "JDBC property name encoding is invalid");
+      validatePropertyName(decodedName, entry.getValue(), true, strictTransport);
       if (decodedName.regionMatches(true, 0, BYPASS_PREFIX, 0, BYPASS_PREFIX.length())) {
-        validateBypassPropertyName(decodedName.substring(BYPASS_PREFIX.length()), entry.getValue());
+        validateBypassPropertyName(
+            decodedName.substring(BYPASS_PREFIX.length()), entry.getValue(), strictTransport);
+      }
+      if (decodedName.regionMatches(
+          true, 0, SPARK_BYPASS_PREFIX, 0, SPARK_BYPASS_PREFIX.length())) {
+        validateSparkBypassPropertyName(
+            decodedName.substring(SPARK_BYPASS_PREFIX.length()), strictTransport);
       }
     }
   }
 
-  private static void validateUrl(String url) {
+  /** Returns the exact governed read transport, applying the compatible default when absent. */
+  public static String readTransport(Map<String, String> properties) {
+    if (properties == null) {
+      throw new IllegalArgumentException("Doris JDBC catalog properties are required");
+    }
+    String value = properties.get(READ_TRANSPORT);
+    return validateReadTransport(value == null ? HYBRID_TRANSPORT : value);
+  }
+
+  private static String validateReadTransport(String value) {
+    if (!HYBRID_TRANSPORT.equals(value) && !STRICT_JDBC_TLS_TRANSPORT.equals(value)) {
+      throw new IllegalArgumentException(
+          "Catalog property doris-read-transport must be hybrid or strict-jdbc-tls");
+    }
+    return value;
+  }
+
+  private static void validateTransportProperties(
+      Map<String, String> properties, boolean strictTransport) {
+    if (strictTransport) {
+      if (properties.containsKey(DORIS_FE_NODES) || properties.containsKey(DORIS_QUERY_PORT)) {
+        throw new IllegalArgumentException(
+            "Strict JDBC TLS transport must not configure native Doris endpoints");
+      }
+      return;
+    }
+    if (isBlank(properties.get(DORIS_FE_NODES))) {
+      throw new IllegalArgumentException(
+          "Hybrid Doris reads require catalog property doris-fenodes");
+    }
+    String queryPort = properties.get(DORIS_QUERY_PORT);
+    if (queryPort == null || !queryPort.matches("[0-9]+")) {
+      throw new IllegalArgumentException(
+          "Hybrid Doris reads require catalog property doris-query-port");
+    }
+    try {
+      int port = Integer.parseInt(queryPort);
+      if (port < 1 || port > 65535) {
+        throw new NumberFormatException("port out of range");
+      }
+    } catch (NumberFormatException e) {
+      throw new IllegalArgumentException("doris-query-port must be between 1 and 65535");
+    }
+  }
+
+  private static void validateUrl(String url, boolean strictTransport) {
     if (url == null || url.isEmpty() || !url.equals(url.trim())) {
       throw invalidUrl();
     }
@@ -140,7 +308,10 @@ public final class DorisJdbcSecurity {
 
     validateAuthority(authority);
     validateDatabase(database);
-    validateQuery(query);
+    Map<String, String> parameters = validateQuery(query);
+    if (strictTransport) {
+      validateStrictTlsParameters(parameters);
+    }
   }
 
   private static void validateAuthority(String authority) {
@@ -202,9 +373,10 @@ public final class DorisJdbcSecurity {
     }
   }
 
-  private static void validateQuery(String query) {
+  private static Map<String, String> validateQuery(String query) {
+    Map<String, String> parameters = new LinkedHashMap<>();
     if (query == null) {
-      return;
+      return parameters;
     }
     if (query.isEmpty()) {
       throw invalidUrl();
@@ -225,20 +397,64 @@ public final class DorisJdbcSecurity {
         throw new IllegalArgumentException("Duplicate Doris JDBC URL parameter is not allowed");
       }
       rejectKnownParameter(normalized);
+      parameters.put(
+          normalized,
+          stableDecode(assignment.substring(equals + 1), "Doris JDBC URL encoding is invalid"));
+    }
+    return parameters;
+  }
+
+  private static void validateStrictTlsParameters(Map<String, String> parameters) {
+    String sslMode = parameters.get("sslmode");
+    if (!"VERIFY_IDENTITY".equals(sslMode)) {
+      throw new IllegalArgumentException(
+          "Strict JDBC TLS transport requires sslMode=VERIFY_IDENTITY");
+    }
+    for (Map.Entry<String, String> entry : parameters.entrySet()) {
+      String name = entry.getKey();
+      if ("sslmode".equals(name)) {
+        continue;
+      }
+      if ("fallbacktosystemtruststore".equals(name)) {
+        if (!"true".equals(entry.getValue())) {
+          throw new IllegalArgumentException(
+              "Strict JDBC TLS parameter fallbackToSystemTrustStore must be true");
+        }
+        continue;
+      }
+      if (STRICT_TLS_REJECTED_PARAMETERS.contains(name)
+          || name.startsWith("ssltruststore")
+          || isTlsControlParameter(name)) {
+        throw new IllegalArgumentException(
+            "Unreviewed JDBC TLS parameters are not allowed in strict transport");
+      }
     }
   }
 
-  private static void validateBypassPropertyName(String name, String value) {
+  private static void validateBypassPropertyName(
+      String name, String value, boolean strictTransport) {
     String normalized = normalize(name, "JDBC property name encoding is invalid");
     if (PROTECTED_BYPASS_PROPERTIES.contains(normalized)) {
       throw new IllegalArgumentException(
           "Protected JDBC property '" + normalized + "' must not use gravitino.bypass");
     }
-    validatePropertyName(name, value, true);
+    validatePropertyName(name, value, true, strictTransport);
+  }
+
+  private static void validateSparkBypassPropertyName(String name, boolean strictTransport) {
+    String normalized = normalize(name, "JDBC property name encoding is invalid");
+    if (PROTECTED_BYPASS_PROPERTIES.contains(normalized)) {
+      throw new IllegalArgumentException(
+          "Protected JDBC property '" + normalized + "' must not use spark.bypass");
+    }
+    if (strictTransport && normalized.startsWith("doris.")) {
+      throw new IllegalArgumentException(
+          "Strict JDBC TLS transport must not configure native Doris options");
+    }
   }
 
   private static void validatePropertyName(
-      String name, String value, boolean allowConnectionProperties) {
+      String name, String value, boolean allowConnectionProperties, boolean strictTransport) {
     if (name == null || name.isEmpty()) {
       throw new IllegalArgumentException("JDBC property name is invalid");
     }
@@ -249,15 +465,19 @@ public final class DorisJdbcSecurity {
           "Unsafe JDBC connection pool property '" + unsafePoolProperty + "' is not allowed");
     }
     rejectKnownParameter(normalized);
+    if (strictTransport && isTlsControlParameter(normalized)) {
+      throw new IllegalArgumentException(
+          "JDBC TLS properties are not allowed outside the canonical URL");
+    }
     if (CONNECTION_PROPERTIES.equals(normalized)) {
       if (!allowConnectionProperties) {
         throw new IllegalArgumentException("Nested JDBC connectionProperties is not allowed");
       }
-      validateConnectionProperties(value);
+      validateConnectionProperties(value, strictTransport);
     }
   }
 
-  private static void validateConnectionProperties(String value) {
+  private static void validateConnectionProperties(String value, boolean strictTransport) {
     if (value == null) {
       throw new IllegalArgumentException("Unable to validate JDBC connectionProperties");
     }
@@ -268,7 +488,7 @@ public final class DorisJdbcSecurity {
       throw new IllegalArgumentException("Unable to validate JDBC connectionProperties");
     }
     for (String name : parsed.stringPropertyNames()) {
-      validatePropertyName(name, parsed.getProperty(name), false);
+      validatePropertyName(name, parsed.getProperty(name), false, strictTransport);
     }
   }
 
@@ -313,6 +533,18 @@ public final class DorisJdbcSecurity {
       throw new IllegalArgumentException(
           "Unsafe Doris JDBC parameter '" + unsafeParameter + "' is not allowed");
     }
+  }
+
+  private static boolean isTlsControlParameter(String normalized) {
+    return normalized.contains("ssl")
+        || normalized.contains("tls")
+        || normalized.contains("truststore")
+        || normalized.contains("keystore")
+        || normalized.contains("certificate");
+  }
+
+  private static boolean isBlank(String value) {
+    return value == null || value.trim().isEmpty();
   }
 
   private static String normalize(String value, String failureMessage) {

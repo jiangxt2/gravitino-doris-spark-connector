@@ -14,6 +14,8 @@
 
 package io.github.jiangxt2.gravitino.doris.spark;
 
+import io.github.jiangxt2.gravitino.doris.security.DorisJdbcSecurity;
+
 /** Shared property names and version constraints of the governed Doris connector. */
 public final class DorisConnectorConstants {
 
@@ -29,6 +31,11 @@ public final class DorisConnectorConstants {
   public static final String JDBC_DRIVER = "jdbc-driver";
   public static final String JDBC_USER = "jdbc-user";
   public static final String JDBC_PASSWORD = "jdbc-password";
+
+  public static final String READ_TRANSPORT = DorisJdbcSecurity.READ_TRANSPORT;
+  public static final String HYBRID_TRANSPORT = DorisJdbcSecurity.HYBRID_TRANSPORT;
+  public static final String STRICT_JDBC_TLS_TRANSPORT =
+      DorisJdbcSecurity.STRICT_JDBC_TLS_TRANSPORT;
 
   public static final String GRAVITINO_DORIS_FE_NODES = "doris-fenodes";
   public static final String GRAVITINO_DORIS_QUERY_PORT = "doris-query-port";

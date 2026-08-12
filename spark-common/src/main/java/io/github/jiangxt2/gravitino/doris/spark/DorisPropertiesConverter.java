@@ -44,6 +44,7 @@ public class DorisPropertiesConverter implements PropertiesConverter {
           DorisConnectorConstants.JDBC_DRIVER,
           DorisConnectorConstants.JDBC_USER,
           DorisConnectorConstants.JDBC_PASSWORD,
+          DorisConnectorConstants.READ_TRANSPORT,
           "url",
           "driver",
           "user",
@@ -69,6 +70,7 @@ public class DorisPropertiesConverter implements PropertiesConverter {
           DorisConnectorConstants.JDBC_DRIVER,
           DorisConnectorConstants.JDBC_USER,
           DorisConnectorConstants.JDBC_PASSWORD,
+          DorisConnectorConstants.READ_TRANSPORT,
           DorisConnectorConstants.GRAVITINO_DORIS_FE_NODES,
           DorisConnectorConstants.GRAVITINO_DORIS_QUERY_PORT,
           DorisConnectorConstants.DORIS_FE_NODES,
@@ -101,6 +103,7 @@ public class DorisPropertiesConverter implements PropertiesConverter {
   public Map<String, String> toSparkCatalogProperties(
       CaseInsensitiveStringMap options, Map<String, String> properties) {
     validateNoCredentialBackfill(properties);
+    DorisReadTransport readTransport = DorisReadTransport.from(properties);
 
     Map<String, String> result = new HashMap<>();
     result.putAll(extractCatalogBypassProperties(properties));
@@ -109,7 +112,15 @@ public class DorisPropertiesConverter implements PropertiesConverter {
           validateConnectorProperties(options.asCaseSensitiveMap(), "Spark catalog options"));
     }
 
+    if (!readTransport.allowsNativeLane() && !result.isEmpty()) {
+      throw new IllegalArgumentException(
+          "Strict JDBC TLS transport must not configure native Doris read options");
+    }
+
     Map<String, String> endpointProperties = toSparkCatalogProperties(properties);
+    if (!readTransport.allowsNativeLane()) {
+      return result;
+    }
     if (!endpointProperties.containsKey(DorisConnectorConstants.DORIS_FE_NODES)) {
       throw new IllegalArgumentException(
           "Governed Doris reads require catalog property "
@@ -132,6 +143,7 @@ public class DorisPropertiesConverter implements PropertiesConverter {
       throw new IllegalArgumentException("Doris catalog properties must not be null");
     }
     validateNoCredentialBackfill(properties);
+    DorisReadTransport readTransport = DorisReadTransport.from(properties);
 
     Map<String, String> result = new HashMap<>();
     String feNodes = properties.get(DorisConnectorConstants.GRAVITINO_DORIS_FE_NODES);
@@ -143,6 +155,10 @@ public class DorisPropertiesConverter implements PropertiesConverter {
     if (queryPort != null) {
       validatePort(DorisConnectorConstants.GRAVITINO_DORIS_QUERY_PORT, queryPort.trim());
       result.put(DorisConnectorConstants.DORIS_QUERY_PORT, queryPort.trim());
+    }
+    if (!readTransport.allowsNativeLane() && !result.isEmpty()) {
+      throw new IllegalArgumentException(
+          "Strict JDBC TLS transport must not configure native Doris endpoints");
     }
     return result;
   }

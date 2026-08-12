@@ -75,14 +75,28 @@ installation guidance while FE HTTP and MySQL/JDBC TCP counters remain zero.
 
 The tests verify direct-result parity, planner pushdown, four-partition JDBC parity, type
 normalization, authorization-before-I/O, cache/refresh, credential redaction, JDBC configuration
-rejection, and read-only boundaries.
+rejection, read-only boundaries, and strict JDBC TLS transport.
 
-The cache contract counts FE schema requests. Ordinary compatible hits reuse one immutable
+The harness creates a private CA, valid FE certificate, expired certificate, unrelated self-signed
+certificate, and client JVM truststore under `integration-tests/build/tmp`. Nothing containing a
+private key is committed. Host fixture directories are `0755` so non-root container entrypoints can
+traverse them; files are mounted read-only. The valid certificate SAN covers the dedicated
+`10.20.30.0/28` test addresses and Docker hostname. Gravitino and the Spark test JVM receive the
+same system truststore; the URL never contains truststore configuration.
+
+Both Doris versions prove strict metadata/schema/read success, Spark JDBC V2 detail/aggregate/
+Top-N/limit/offset/partition behavior, zero FE HTTP for the strict path, and JDBC TCP positive
+control. Negative cases prove a same-CA hostname mismatch, unknown CA, expired certificate, and a
+TLS-disabled server cannot fall back to plaintext. The destructive certificate/TLS swaps run last
+inside each suite.
+
+The cache contract counts FE schema requests for `hybrid` and proves that the corresponding
+`strict-jdbc-tls` operations make none. Ordinary compatible hits reuse one immutable
 Catalyst/type-name pair; explicit invalidation reloads only the target key. The schema-drift test
 alters a real Doris table, then proves that Spark's pre-invalidation `REFRESH TABLE` analysis makes
-exactly one conditional replacement load before the command invalidates the key. The next table
-load fetches a complete snapshot again. Fresh incompatibility and physical-load errors remain
-fail-closed and are not retried.
+exactly one conditional replacement over each transport before the command invalidates its key.
+The next table load fetches a complete snapshot again. Fresh incompatibility and physical-load
+errors remain fail-closed and are not retried.
 
 The TCP helper records only accepted/active connection counts and a reset generation. It never
 parses or stores MySQL handshakes, SQL, credentials, or other payload bytes. Positive controls first
@@ -103,6 +117,7 @@ traffic.
 The JDBC security unit matrix covers the exact driver, ordinary URL grammar, malformed and encoded
 forms, embedded credentials, dangerous Connector/J names, raw and encoded
 `gravitino.bypass.*` keys, DBCP class-loading/identity/eager-init/SQL-execution/exposure properties,
+Connector/J file/authentication targets and diagnostic-disclosure switches,
 and one-level `connectionProperties` parsing with semicolons, newlines, continuation, Unicode, and
 malformed escapes. Deeply nested `connectionProperties` must fail with a bounded validation error,
 never `StackOverflowError`. Malicious catalog creation, including `connectionInitSqls`, is also
@@ -146,6 +161,11 @@ on normalized columns.
 The matrix intentionally distinguishes Doris DDL acceptance from converter parsing. Unit tests
 keep regression coverage for provider parsing of metadata strings such as legacy decimal names,
 but a parser branch does not promote a DDL form into the certified read contract.
+
+This type matrix is certified through the `hybrid` FE-aware schema path. The strict integration
+lane independently proves its JDBC-only schema and value path on the lossless scalar, aggregate,
+limit/offset, and partitioned tables. It does not reuse FE metadata or inherit certification for
+the matrix's JDBC-lossy Doris-specific families.
 
 ## macOS Docker routing
 

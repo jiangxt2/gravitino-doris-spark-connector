@@ -66,13 +66,13 @@ Spark SQL
   -> GovernedDorisCatalogSpark35.initialize
      -> shared JDBC URL/driver validation
      -> MySQL Driver availability preflight
-     -> physical catalog construction and credential vending
+     -> immutable transport selection and credential vending
   -> GovernedDorisCatalogSpark35.loadTable
      -> Gravitino TableCatalog.loadTable(identifier, SELECT_TABLE)
-     -> FE physical schema snapshot and compatibility validation
+     -> authorized physical schema snapshot and compatibility validation
      -> GovernedDorisTable
-        -> native lane: official Doris tablet scan
-        -> SQL lane: Spark JDBCTable/JDBCScanBuilder
+        -> hybrid: official tablet reader or Spark JDBCTable/JDBCScanBuilder
+        -> strict-jdbc-tls: Spark JDBCTable/JDBCScanBuilder only
 ```
 
 An authorization exception exits before native catalog `loadTable`, FE HTTP, scan construction, or
@@ -99,9 +99,12 @@ smuggling through `connectionProperties`. The DBCP string is parsed once, matchi
 consumption; nested `connectionProperties` is rejected instead of recursively reinterpreted.
 Failures use fixed messages and never include raw connection material.
 
-This boundary is configuration hardening, not transport certification. Strict TLS and endpoint
-identity/coherence remain separate work; the current native and SQL lanes must not be described as
-verified-TLS paths.
+The strict profile adds a second structural catalog factory: it creates Spark's JDBC-only catalog,
+loads the physical snapshot over the verified JDBC connection only after authorization, and seeds
+the same `JDBCTable` used for reads. It never instantiates the official Doris catalog. The profile
+requires Connector/J `VERIFY_IDENTITY` and the JVM system truststore, so Gravitino metadata, Spark
+schema, and Spark reads share one CA/hostname-verified endpoint. The compatible hybrid profile
+remains outside that certification.
 
 ## Distribution and dependency integrity boundary
 
@@ -152,15 +155,17 @@ Integration tests compare both paths with direct Doris results.
 
 ## Schema and type boundary
 
-The adapter takes one FE schema snapshot, compares it directionally with the authorized Gravitino
-table, and returns an executable Spark schema. It retains physical order, names, and nullability,
-while merging governed comments.
+The adapter takes one physical schema snapshot, compares it directionally with the authorized
+Gravitino table, and returns an executable Spark schema. Hybrid reads obtain the snapshot from FE
+HTTP; strict reads obtain column order, name, `TYPE_NAME`, precision, scale, and nullability from
+JDBC metadata without FE HTTP. Both retain physical order, names, and nullability while merging
+governed comments.
 
-Directly representable scalar types remain typed. DATETIME avoids JVM and Spark-session time-zone
-conversion by using Doris text. The verified ARRAY, MAP, STRUCT, LARGEINT, JSON/JSONB, VARIANT, IP,
-and Doris 4 wide-decimal forms use JDBC `getString`; BITMAP and HLL use explicit base64
-projections. The exact two-version contract and probe-only DDL forms are recorded in
-[Testing](testing.md#type-contract-evidence).
+In the `hybrid` profile, directly representable scalar types remain typed. DATETIME avoids JVM and
+Spark-session time-zone conversion by using Doris text. The verified ARRAY, MAP, STRUCT, LARGEINT,
+JSON/JSONB, VARIANT, IP, and Doris 4 wide-decimal forms use JDBC `getString`; BITMAP and HLL use
+explicit base64 projections. The exact two-version contract and probe-only DDL forms are recorded
+in [Testing](testing.md#type-contract-evidence).
 
 Gravitino 1.3 obtains Doris logical types through JDBC metadata, which can erase complex
 containers, report LARGEINT as INTEGER, and report sketch, VARIANT, or IP types through lossy or
@@ -172,6 +177,10 @@ nullability remain strict. Lossless scalars and normalized families whose JDBC i
 retain directional type checks. The adapter does not rely on a private or synthetic table marker
 property.
 
+The strict profile never consults FE metadata. It is certified separately for the JDBC-lossless
+scalar schemas in the strict IT matrix; it does not inherit the FE-authoritative normalization
+contract for the JDBC-lossy families above.
+
 The compatibility overload without FE type names is a conservative legacy path, not a production
 type-identity source. It permits lossless scalars plus timestamp and binary normalization that can
 be proven from the logical and Catalyst types alone. External, generic, unsigned, complex, sketch,
@@ -179,16 +188,16 @@ and future types fail closed on that path and cannot be promoted into the two-ve
 matrix.
 
 The per-catalog physical-schema cache is bounded by size and TTL. One successful authorized table
-load uses one immutable pair of Catalyst fields and FE type names for compatibility validation,
-execution schema, and projection planning; this is not a cross-system transactional snapshot.
-Authorization and current logical-schema comparison run on every load, including cache hits.
-A compatible cache hit does not access FE again. If a cached snapshot fails compatibility because
-Doris DDL changed, the adapter conditionally removes only that exact snapshot, coalesces one fresh
-FE load, and validates once more. This bounded revalidation lets Spark resolve `REFRESH TABLE`,
-whose analysis loads the relation before calling catalog invalidation. A mismatch from a cache
-miss or from the one fresh replacement still fails closed; physical load failures are never
-retried. `invalidateTable` invalidates only the precise table key, expiry reloads the complete pair,
-and a zero TTL retains no cached snapshot.
+load uses one immutable pair of Catalyst fields and physical type names for compatibility
+validation, execution schema, and projection planning; this is not a cross-system transactional
+snapshot. Authorization and current logical-schema comparison run on every load, including cache
+hits. A compatible cache hit does not access its physical metadata endpoint again. If a cached
+snapshot fails compatibility because Doris DDL changed, the adapter conditionally removes only
+that exact snapshot, coalesces one fresh transport-specific load, and validates once more. This
+bounded revalidation lets Spark resolve `REFRESH TABLE`, whose analysis loads the relation before
+calling catalog invalidation. A mismatch from a cache miss or from the one fresh replacement still
+fails closed; physical load failures are never retried. `invalidateTable` invalidates only the
+precise table key, expiry reloads the complete pair, and a zero TTL retains no cached snapshot.
 
 ## Credential and trust boundary
 
@@ -207,13 +216,14 @@ reinitialized, normally by recreating the Spark session.
 `SupportsWrite`, but its write-builder entry point is unreachable through the advertised
 capabilities and explicitly rejects direct calls. Every Catalog DDL method already routes through
 `DorisCatalogMutationDelegate`, whose initial implementation rejects mutations.
-`DorisWriteDelegateFactory` is already invoked after authorization and schema validation; its
-`DorisAuthorizedTableContext` retains the original official Doris table and validated read delegate
-without exposing credentials through string rendering. The Spark 3.5 write-privilege load path is
-also policy-gated and reuses Gravitino's `MODIFY_TABLE` authorization when enabled. A future
-implementation replaces the two delegates and capability policy; it does not replace plugin
-registration, authorization ordering, table facade, identifier handling, schema validation, or
-credential resolution.
+For `hybrid`, `DorisWriteDelegateFactory` is invoked after authorization and schema validation;
+its `DorisAuthorizedTableContext` retains the original official Doris physical table and validated
+read delegate without exposing credentials through string rendering. `strict-jdbc-tls` has no
+native physical table and deliberately bypasses this future write seam, remaining structurally
+read-only. The Spark 3.5 write-privilege load path is also policy-gated and reuses Gravitino's
+`MODIFY_TABLE` authorization when enabled. A future hybrid write implementation replaces the two
+delegates and capability policy; it does not replace plugin registration, authorization ordering,
+table facade, identifier handling, schema validation, or credential resolution.
 
 ## Requirement traceability
 
@@ -227,5 +237,6 @@ credential resolution.
 | No architecture rewrite for future writes | centralized policy and delegates | capability and explicit-rejection tests |
 | JDBC configuration fails closed before I/O | shared `jdbc-security` module on server and Spark | exhaustive parser tests and malicious-catalog IT |
 | Authorization denial avoids observed Doris entry points | fresh catalog managers plus HTTP/TCP recorders | direct and SQL denial IT on both Doris versions |
+| Verified JDBC transport | strict profile, JVM truststore, JDBC-only schema/read catalog | trusted CA plus unknown-CA, hostname, expiry, and plaintext failures on both Doris versions |
 | Production dependency boundary is auditable | strict distribution lock, SHA-256 verification, immutable workflow actions, archive scanner | empty-cache build, compatibility matrix, and distribution contract |
 | Connector/J remains external | Driver preflight plus zero-class archive scan | missing/present Driver IT and all three distribution forms |

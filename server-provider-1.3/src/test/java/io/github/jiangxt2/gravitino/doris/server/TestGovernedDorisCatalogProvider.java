@@ -28,7 +28,7 @@ public class TestGovernedDorisCatalogProvider {
   private static final String DRIVER = "com.mysql.cj.jdbc.Driver";
 
   @Test
-  void hasUniqueServiceLoadedShortNameAndRequiredEndpoint() {
+  void hasUniqueServiceLoadedShortNameAndProfileAwareEndpoints() {
     assertThat(
             ServiceLoader.load(CatalogProvider.class).stream()
                 .map(ServiceLoader.Provider::get)
@@ -39,10 +39,10 @@ public class TestGovernedDorisCatalogProvider {
 
     GovernedDorisCatalogProvider provider = new GovernedDorisCatalogProvider();
     assertThat(provider.catalogPropertiesMetadata().getPropertyEntry("doris-fenodes").isRequired())
-        .isTrue();
+        .isFalse();
     org.apache.gravitino.connector.PropertyEntry<?> queryPort =
         provider.catalogPropertiesMetadata().getPropertyEntry("doris-query-port");
-    assertThat(queryPort.isRequired()).isTrue();
+    assertThat(queryPort.isRequired()).isFalse();
     assertThat(queryPort.decode("9030")).isEqualTo(9030);
     assertThatThrownBy(() -> queryPort.decode("0"))
         .isInstanceOf(IllegalArgumentException.class)
@@ -53,6 +53,18 @@ public class TestGovernedDorisCatalogProvider {
     assertThat(provider.catalogPropertiesMetadata().getPropertyEntry("jdbc-password").isHidden())
         .isTrue();
     assertThat(provider.catalogPropertiesMetadata().containsProperty("doris-jdbc-num-partitions"))
+        .isTrue();
+    assertThat(
+            provider
+                .catalogPropertiesMetadata()
+                .getPropertyEntry("doris-read-transport")
+                .getDefaultValue())
+        .isEqualTo("hybrid");
+    assertThat(
+            provider
+                .catalogPropertiesMetadata()
+                .getPropertyEntry("doris-read-transport")
+                .isImmutable())
         .isTrue();
   }
 
@@ -101,6 +113,8 @@ public class TestGovernedDorisCatalogProvider {
     properties.put("jdbc-driver", DRIVER);
     properties.put("jdbc-user", "reader");
     properties.put("jdbc-password", "provider-secret-canary");
+    properties.put("doris-fenodes", "fe:8030");
+    properties.put("doris-query-port", "9030");
     return properties;
   }
 }

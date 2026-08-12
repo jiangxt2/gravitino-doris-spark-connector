@@ -45,6 +45,13 @@ public class GovernedDorisCatalogSpark35 extends GovernedDorisCatalog {
   }
 
   @Override
+  protected TableCatalog createDorisTableCatalog(DorisReadTransport transport) {
+    return transport.allowsNativeLane()
+        ? new SchemaSeededDorisTableCatalog35()
+        : new JdbcOnlyTableCatalog35();
+  }
+
+  @Override
   protected DorisPhysicalSchema loadPhysicalSchema(
       TableCatalog sparkCatalog, Identifier identifier, Table sparkTable) {
     DorisChecks.checkArgument(
@@ -66,6 +73,31 @@ public class GovernedDorisCatalogSpark35 extends GovernedDorisCatalog {
         "Unexpected Doris table catalog implementation: %s",
         sparkCatalog.getClass().getName());
     return ((SchemaSeededDorisTableCatalog35) sparkCatalog)
+        .loadTable(identifier, readSchema, connectionInfo, readOptions);
+  }
+
+  @Override
+  protected DorisPhysicalSchema loadStrictPhysicalSchema(
+      TableCatalog sparkCatalog, Identifier identifier, DorisJdbcConnectionInfo connectionInfo) {
+    DorisChecks.checkArgument(
+        sparkCatalog instanceof JdbcOnlyTableCatalog35,
+        "Unexpected strict Doris catalog implementation: %s",
+        sparkCatalog.getClass().getName());
+    return ((JdbcOnlyTableCatalog35) sparkCatalog).loadPhysicalSchema(identifier, connectionInfo);
+  }
+
+  @Override
+  protected Table createStrictJdbcTable(
+      TableCatalog sparkCatalog,
+      Identifier identifier,
+      DorisReadSchema readSchema,
+      DorisJdbcConnectionInfo connectionInfo,
+      DorisJdbcReadOptions readOptions) {
+    DorisChecks.checkArgument(
+        sparkCatalog instanceof JdbcOnlyTableCatalog35,
+        "Unexpected strict Doris catalog implementation: %s",
+        sparkCatalog.getClass().getName());
+    return ((JdbcOnlyTableCatalog35) sparkCatalog)
         .loadTable(identifier, readSchema, connectionInfo, readOptions);
   }
 

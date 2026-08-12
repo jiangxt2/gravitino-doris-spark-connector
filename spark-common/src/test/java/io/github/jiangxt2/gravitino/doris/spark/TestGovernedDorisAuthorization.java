@@ -137,7 +137,11 @@ public class TestGovernedDorisAuthorization {
             DorisConnectorConstants.JDBC_URL,
             "jdbc:mysql://fe:9030/",
             DorisConnectorConstants.JDBC_DRIVER,
-            "com.mysql.cj.jdbc.Driver");
+            "com.mysql.cj.jdbc.Driver",
+            DorisConnectorConstants.GRAVITINO_DORIS_FE_NODES,
+            "fe:8030",
+            DorisConnectorConstants.GRAVITINO_DORIS_QUERY_PORT,
+            "9030");
 
     assertThatThrownBy(() -> securityCatalog.createPhysicalCatalog(properties))
         .isInstanceOf(IllegalStateException.class)

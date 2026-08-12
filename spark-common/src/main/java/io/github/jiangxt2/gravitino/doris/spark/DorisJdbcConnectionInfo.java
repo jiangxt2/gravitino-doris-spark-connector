@@ -23,6 +23,7 @@ public final class DorisJdbcConnectionInfo {
   private final String driver;
   private final String user;
   private final String password;
+  private final DorisReadTransport readTransport;
 
   /**
    * Creates JDBC connection material without exposing it through object string rendering.
@@ -33,11 +34,34 @@ public final class DorisJdbcConnectionInfo {
    * @param password the vended JDBC password
    */
   public DorisJdbcConnectionInfo(String url, String driver, String user, String password) {
-    DorisJdbcSecurity.validateConnection(url, driver);
+    this(url, driver, user, password, DorisReadTransport.HYBRID);
+  }
+
+  /**
+   * Creates JDBC connection material for one governed read transport.
+   *
+   * @param url the Doris MySQL-protocol JDBC URL
+   * @param driver the JDBC driver class
+   * @param user the vended JDBC user
+   * @param password the vended JDBC password
+   * @param readTransport the immutable governed transport profile
+   */
+  public DorisJdbcConnectionInfo(
+      String url, String driver, String user, String password, DorisReadTransport readTransport) {
+    if (readTransport == null) {
+      throw new IllegalArgumentException("Doris Spark adapter requires a read transport");
+    }
+    DorisJdbcSecurity.validateConnection(
+        url,
+        driver,
+        readTransport == DorisReadTransport.STRICT_JDBC_TLS
+            ? DorisConnectorConstants.STRICT_JDBC_TLS_TRANSPORT
+            : DorisConnectorConstants.HYBRID_TRANSPORT);
     this.url = url;
     this.driver = driver;
     this.user = requireNonBlank("JDBC user", user);
     this.password = requireNonNull("JDBC password", password);
+    this.readTransport = readTransport;
   }
 
   /** Returns the Doris JDBC URL. */
@@ -58,6 +82,11 @@ public final class DorisJdbcConnectionInfo {
   /** Returns the vended JDBC password. */
   public String password() {
     return password;
+  }
+
+  /** Returns the immutable governed read transport. */
+  public DorisReadTransport readTransport() {
+    return readTransport;
   }
 
   @Override

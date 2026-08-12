@@ -29,8 +29,8 @@ public final class DorisPhysicalSchema {
   /**
    * Creates one physical schema snapshot.
    *
-   * @param schema the Catalyst schema derived from the Doris FE response
-   * @param dorisTypeNames the corresponding original Doris FE type names
+   * @param schema the Catalyst schema derived from physical Doris metadata
+   * @param dorisTypeNames the corresponding original Doris type names
    */
   public DorisPhysicalSchema(StructType schema, List<String> dorisTypeNames) {
     Objects.requireNonNull(schema, "Doris physical schema must not be null");
@@ -52,7 +52,7 @@ public final class DorisPhysicalSchema {
     return schema;
   }
 
-  /** Returns the original Doris FE type name for a field. */
+  /** Returns the original Doris type name for a field. */
   public String dorisTypeName(int index) {
     return dorisTypeNames.get(index);
   }

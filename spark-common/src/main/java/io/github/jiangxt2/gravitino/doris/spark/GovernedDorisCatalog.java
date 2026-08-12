@@ -41,7 +41,7 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-/** A governed, read-only Spark catalog that delegates Doris IO to the official Connector. */
+/** A governed, read-only Spark catalog for native-compatible or strict JDBC Doris reads. */
 public abstract class GovernedDorisCatalog extends GravitinoJdbcCatalog {
 
   private static final Logger LOG = LoggerFactory.getLogger(GovernedDorisCatalog.class);
@@ -50,11 +50,12 @@ public abstract class GovernedDorisCatalog extends GravitinoJdbcCatalog {
       "MySQL Connector/J (tested with com.mysql:mysql-connector-j:8.0.33) is required on the "
           + "Spark driver and every executor classpath; distribute it with --jars or spark.jars";
 
-  /** The official Connector artifact required on Spark driver and executor classpaths. */
+  /** Credential-vended connection material shared by the selected read transport. */
   private DorisJdbcConnectionInfo jdbcConnectionInfo;
 
   private DorisJdbcReadOptions jdbcReadOptions;
   private DorisPhysicalSchemaCache physicalSchemaCache;
+  private DorisReadTransport readTransport;
   private final DorisCapabilityPolicy defaultCapabilityPolicy = DorisCapabilityPolicy.readOnly();
   private final DorisCatalogMutationDelegate defaultMutationDelegate =
       DorisCatalogMutationDelegate.readOnly(defaultCapabilityPolicy);
@@ -76,6 +77,15 @@ public abstract class GovernedDorisCatalog extends GravitinoJdbcCatalog {
     }
 
     // Authorization above is deliberately completed before any physical delegate is touched.
+    if (readTransport == DorisReadTransport.STRICT_JDBC_TLS) {
+      return createStrictSparkTable(
+          ident,
+          gravitinoTable,
+          sparkCatalog,
+          propertiesConverter,
+          sparkTransformConverter,
+          getSparkTypeConverter());
+    }
     Table physicalTable;
     try {
       physicalTable = loadSparkTable(ident);
@@ -148,14 +158,19 @@ public abstract class GovernedDorisCatalog extends GravitinoJdbcCatalog {
   @Override
   protected TableCatalog createAndInitSparkCatalog(
       String name, CaseInsensitiveStringMap options, Map<String, String> properties) {
+    DorisJdbcSecurity.validateServerCatalogProperties(properties);
+    readTransport = DorisReadTransport.from(properties);
     DorisJdbcSecurity.validateConnection(
         properties.get(DorisConnectorConstants.JDBC_URL),
-        properties.get(DorisConnectorConstants.JDBC_DRIVER));
+        properties.get(DorisConnectorConstants.JDBC_DRIVER),
+        readTransport == DorisReadTransport.STRICT_JDBC_TLS
+            ? DorisConnectorConstants.STRICT_JDBC_TLS_TRANSPORT
+            : DorisConnectorConstants.HYBRID_TRANSPORT);
     requireMysqlDriver();
 
     TableCatalog dorisCatalog;
     try {
-      dorisCatalog = createDorisTableCatalog();
+      dorisCatalog = createDorisTableCatalog(readTransport);
     } catch (LinkageError e) {
       throw missingConnectorDependency(e);
     }
@@ -163,14 +178,22 @@ public abstract class GovernedDorisCatalog extends GravitinoJdbcCatalog {
     Map<String, String> connectorProperties =
         getPropertiesConverter().toSparkCatalogProperties(options, properties);
     JdbcCredential credential = DorisCredentialResolver.resolve(gravitinoCatalogClient);
-    connectorProperties.put(DorisConnectorConstants.DORIS_USER, credential.jdbcUser());
-    connectorProperties.put(DorisConnectorConstants.DORIS_PASSWORD, credential.jdbcPassword());
+    if (readTransport.allowsNativeLane()) {
+      connectorProperties.put(DorisConnectorConstants.DORIS_USER, credential.jdbcUser());
+      connectorProperties.put(DorisConnectorConstants.DORIS_PASSWORD, credential.jdbcPassword());
+    } else {
+      connectorProperties.put("url", properties.get(DorisConnectorConstants.JDBC_URL));
+      connectorProperties.put("driver", properties.get(DorisConnectorConstants.JDBC_DRIVER));
+      connectorProperties.put("user", credential.jdbcUser());
+      connectorProperties.put("password", credential.jdbcPassword());
+    }
     jdbcConnectionInfo =
         new DorisJdbcConnectionInfo(
             properties.get(DorisConnectorConstants.JDBC_URL),
             properties.get(DorisConnectorConstants.JDBC_DRIVER),
             credential.jdbcUser(),
-            credential.jdbcPassword());
+            credential.jdbcPassword(),
+            readTransport);
     jdbcReadOptions = DorisJdbcReadOptions.from(properties);
     physicalSchemaCache = DorisPhysicalSchemaCache.from(properties);
 
@@ -183,10 +206,10 @@ public abstract class GovernedDorisCatalog extends GravitinoJdbcCatalog {
       // Third-party configuration exceptions are outside the adapter's credential-redaction
       // boundary and may have access to the complete option map.
       LOG.warn(
-          "Native Doris catalog initialization failed for catalog {} with exception type {}",
+          "Doris read catalog initialization failed for catalog {} with exception type {}",
           name,
           e.getClass().getSimpleName());
-      throw new IllegalArgumentException("Failed to initialize the native Doris Spark catalog");
+      throw new IllegalArgumentException("Failed to initialize the Doris Spark read catalog");
     }
   }
 
@@ -201,54 +224,13 @@ public abstract class GovernedDorisCatalog extends GravitinoJdbcCatalog {
       SparkTypeConverter sparkTypeConverter) {
     Supplier<DorisPhysicalSchema> physicalSchemaLoader =
         () -> loadPhysicalSchema(sparkCatalog, identifier, sparkTable);
-    DorisPhysicalSchemaCache.Lookup physicalSchemaLookup;
-    try {
-      // The normal path makes at most one physical schema request after authorization. The
-      // version-specific implementation may retain the original FE type names that the
-      // Connector's Catalyst schema intentionally normalizes.
-      physicalSchemaLookup = physicalSchemaCache.getWithStatus(identifier, physicalSchemaLoader);
-    } catch (LinkageError e) {
-      throw missingConnectorDependency(e);
-    } catch (RuntimeException e) {
-      // Do not retain or log the Connector exception: third-party exception text is outside the
-      // adapter's credential-redaction boundary.
-      throw new IllegalArgumentException(
-          String.format(
-              "Failed to load physical Doris schema for authorized table %s",
-              qualifiedIdentifier(identifier)));
-    }
-
-    DorisReadSchema readSchema;
-    try {
-      readSchema =
-          DorisSchemaCompatibility.planReadSchema(
-              identifier, gravitinoTable, physicalSchemaLookup.schema(), sparkTypeConverter);
-    } catch (IllegalArgumentException incompatibleCachedSnapshot) {
-      if (!physicalSchemaLookup.cacheHit()) {
-        throw incompatibleCachedSnapshot;
-      }
-
-      // Spark resolves a REFRESH TABLE relation before it invokes invalidateTable. If that
-      // resolution observes a cached snapshot made stale by Doris DDL, conditionally replace only
-      // that exact snapshot and validate once more. A fresh mismatch still fails closed, and this
-      // path never retries physical load failures.
-      DorisPhysicalSchema refreshedPhysicalSchema;
-      try {
-        refreshedPhysicalSchema =
-            physicalSchemaCache.reloadIfSame(
-                identifier, physicalSchemaLookup.schema(), physicalSchemaLoader);
-      } catch (LinkageError e) {
-        throw missingConnectorDependency(e);
-      } catch (RuntimeException e) {
-        throw new IllegalArgumentException(
-            String.format(
-                "Failed to load physical Doris schema for authorized table %s",
-                qualifiedIdentifier(identifier)));
-      }
-      readSchema =
-          DorisSchemaCompatibility.planReadSchema(
-              identifier, gravitinoTable, refreshedPhysicalSchema, sparkTypeConverter);
-    }
+    DorisReadSchema readSchema =
+        loadAndValidateReadSchema(
+            identifier,
+            gravitinoTable,
+            physicalSchemaLoader,
+            sparkTypeConverter,
+            "Failed to load physical Doris schema for authorized table %s");
     Table readDelegate;
     try {
       readDelegate =
@@ -296,6 +278,98 @@ public abstract class GovernedDorisCatalog extends GravitinoJdbcCatalog {
         sparkTypeConverter);
   }
 
+  private Table createStrictSparkTable(
+      Identifier identifier,
+      org.apache.gravitino.rel.Table gravitinoTable,
+      TableCatalog strictCatalog,
+      PropertiesConverter propertiesConverter,
+      SparkTransformConverter sparkTransformConverter,
+      SparkTypeConverter sparkTypeConverter) {
+    Supplier<DorisPhysicalSchema> physicalSchemaLoader =
+        () -> loadStrictPhysicalSchema(strictCatalog, identifier, jdbcConnectionInfo);
+    DorisReadSchema readSchema =
+        loadAndValidateReadSchema(
+            identifier,
+            gravitinoTable,
+            physicalSchemaLoader,
+            sparkTypeConverter,
+            "Failed to load verified JDBC schema for authorized table %s");
+    Table readDelegate;
+    try {
+      readDelegate =
+          createStrictJdbcTable(
+              strictCatalog, identifier, readSchema, jdbcConnectionInfo, jdbcReadOptions);
+    } catch (LinkageError e) {
+      throw missingConnectorDependency(e);
+    } catch (RuntimeException e) {
+      throw new IllegalArgumentException(
+          String.format(
+              "Failed to create the verified JDBC read table for authorized table %s",
+              qualifiedIdentifier(identifier)));
+    }
+
+    // The existing write seam is intentionally tied to the official Doris physical table used by
+    // the hybrid profile. A strict JDBC-only read has no equivalent native physical table, so it
+    // remains structurally read-only instead of disguising its JDBC read delegate as one.
+    return createGovernedDorisTable(
+        identifier,
+        gravitinoTable,
+        readDelegate,
+        readSchema.schema(),
+        propertiesConverter,
+        sparkTransformConverter,
+        sparkTypeConverter);
+  }
+
+  private DorisReadSchema loadAndValidateReadSchema(
+      Identifier identifier,
+      org.apache.gravitino.rel.Table gravitinoTable,
+      Supplier<DorisPhysicalSchema> physicalSchemaLoader,
+      SparkTypeConverter sparkTypeConverter,
+      String loadFailureMessage) {
+    DorisPhysicalSchemaCache.Lookup physicalSchemaLookup;
+    try {
+      // The normal path makes at most one physical schema request after authorization. The
+      // transport-specific implementation may retain physical type names that its Catalyst
+      // schema intentionally normalizes.
+      physicalSchemaLookup = physicalSchemaCache.getWithStatus(identifier, physicalSchemaLoader);
+    } catch (LinkageError e) {
+      throw missingConnectorDependency(e);
+    } catch (RuntimeException e) {
+      // Do not retain or log the physical loader exception: third-party exception text is outside
+      // the adapter's credential-redaction boundary.
+      throw new IllegalArgumentException(
+          String.format(loadFailureMessage, qualifiedIdentifier(identifier)));
+    }
+
+    try {
+      return DorisSchemaCompatibility.planReadSchema(
+          identifier, gravitinoTable, physicalSchemaLookup.schema(), sparkTypeConverter);
+    } catch (IllegalArgumentException incompatibleCachedSnapshot) {
+      if (!physicalSchemaLookup.cacheHit()) {
+        throw incompatibleCachedSnapshot;
+      }
+
+      // Spark resolves a REFRESH TABLE relation before it invokes invalidateTable. If that
+      // resolution observes a cached snapshot made stale by Doris DDL, conditionally replace only
+      // that exact snapshot and validate once more. A fresh mismatch still fails closed, and this
+      // path never retries physical load failures.
+      DorisPhysicalSchema refreshedPhysicalSchema;
+      try {
+        refreshedPhysicalSchema =
+            physicalSchemaCache.reloadIfSame(
+                identifier, physicalSchemaLookup.schema(), physicalSchemaLoader);
+      } catch (LinkageError e) {
+        throw missingConnectorDependency(e);
+      } catch (RuntimeException e) {
+        throw new IllegalArgumentException(
+            String.format(loadFailureMessage, qualifiedIdentifier(identifier)));
+      }
+      return DorisSchemaCompatibility.planReadSchema(
+          identifier, gravitinoTable, refreshedPhysicalSchema, sparkTypeConverter);
+    }
+  }
+
   @Override
   protected PropertiesConverter getPropertiesConverter() {
     return DorisPropertiesConverter.getInstance();
@@ -310,7 +384,16 @@ public abstract class GovernedDorisCatalog extends GravitinoJdbcCatalog {
   @Override
   protected abstract SparkTypeConverter getSparkTypeConverter();
 
-  /** Creates the version-specific official Doris table catalog. */
+  /** Creates the version-specific read catalog without opening a connection. */
+  protected TableCatalog createDorisTableCatalog(DorisReadTransport transport) {
+    if (!transport.allowsNativeLane()) {
+      throw new UnsupportedOperationException(
+          "This Spark adapter does not implement strict JDBC TLS reads");
+    }
+    return createDorisTableCatalog();
+  }
+
+  /** Creates the version-specific official Doris table catalog for compatible hybrid reads. */
   protected abstract TableCatalog createDorisTableCatalog();
 
   /**
@@ -341,6 +424,24 @@ public abstract class GovernedDorisCatalog extends GravitinoJdbcCatalog {
       DorisReadSchema readSchema,
       DorisJdbcConnectionInfo connectionInfo,
       DorisJdbcReadOptions readOptions);
+
+  /** Loads a physical schema over the verified JDBC transport after authorization. */
+  protected DorisPhysicalSchema loadStrictPhysicalSchema(
+      TableCatalog sparkCatalog, Identifier identifier, DorisJdbcConnectionInfo connectionInfo) {
+    throw new UnsupportedOperationException(
+        "This Spark adapter does not implement strict JDBC TLS schema loading");
+  }
+
+  /** Creates the Spark JDBC V2 table used by a strict read after schema validation. */
+  protected Table createStrictJdbcTable(
+      TableCatalog sparkCatalog,
+      Identifier identifier,
+      DorisReadSchema readSchema,
+      DorisJdbcConnectionInfo connectionInfo,
+      DorisJdbcReadOptions readOptions) {
+    throw new UnsupportedOperationException(
+        "This Spark adapter does not implement strict JDBC TLS table loading");
+  }
 
   /**
    * Creates the governed table facade for the active Spark version.
@@ -400,7 +501,9 @@ public abstract class GovernedDorisCatalog extends GravitinoJdbcCatalog {
 
   @Override
   public void invalidateTable(Identifier ident) {
-    super.invalidateTable(ident);
+    if (readTransport == null || readTransport.allowsNativeLane()) {
+      super.invalidateTable(ident);
+    }
     if (physicalSchemaCache != null) {
       physicalSchemaCache.invalidate(ident);
     }

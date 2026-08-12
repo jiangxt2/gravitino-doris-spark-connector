@@ -17,6 +17,7 @@ package io.github.jiangxt2.gravitino.doris.server;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Maps;
+import io.github.jiangxt2.gravitino.doris.security.DorisJdbcSecurity;
 import java.util.List;
 import java.util.Map;
 import org.apache.gravitino.catalog.jdbc.JdbcCatalogPropertiesMetadata;
@@ -30,16 +31,19 @@ public final class GovernedDorisCatalogPropertiesMetadata extends JdbcCatalogPro
   static {
     List<PropertyEntry<?>> entries =
         ImmutableList.of(
-            PropertyEntry.stringPropertyEntry(
-                "doris-fenodes",
-                "Comma-separated Doris FE HTTP endpoints in host:httpPort format",
-                true,
+            PropertyEntry.stringImmutablePropertyEntry(
+                DorisJdbcSecurity.READ_TRANSPORT,
+                "Governed Doris read transport: hybrid or strict-jdbc-tls",
                 false,
-                null,
+                DorisJdbcSecurity.HYBRID_TRANSPORT,
                 false,
                 false),
-            requiredPort(
-                "doris-query-port", "Required Doris FE MySQL query port used by native planning"),
+            optionalString(
+                DorisJdbcSecurity.DORIS_FE_NODES,
+                "Doris FE HTTP endpoints required only by hybrid native planning"),
+            optionalPort(
+                DorisJdbcSecurity.DORIS_QUERY_PORT,
+                "Doris FE MySQL query port required only by hybrid native planning"),
             optionalString(
                 "doris-jdbc-partition-column",
                 "Spark JDBC partition column for String-normalized detail scans"),
@@ -73,11 +77,11 @@ public final class GovernedDorisCatalogPropertiesMetadata extends JdbcCatalogPro
     return PropertyEntry.stringOptionalPropertyEntry(name, description, false, null, false);
   }
 
-  private static PropertyEntry<Integer> requiredPort(String name, String description) {
+  private static PropertyEntry<Integer> optionalPort(String name, String description) {
     return new PropertyEntry.Builder<Integer>()
         .withName(name)
         .withDescription(description)
-        .withRequired(true)
+        .withRequired(false)
         .withImmutable(false)
         .withJavaType(Integer.class)
         .withDecoder(value -> decodePort(name, value))

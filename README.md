@@ -38,6 +38,7 @@ connector adds:
 - a `SELECT_TABLE` authorization check before native table loading or JDBC table materialization;
 - fail-closed JDBC URL, driver, Connector/J parameter, and DBCP configuration validation on both
   the Gravitino server and Spark sides;
+- an explicit `strict-jdbc-tls` profile that verifies CA and hostname on one JDBC-only transport;
 - vended JDBC credentials applied after all user-controlled options;
 - native, parallel Doris tablet reads for lossless detail scans;
 - aggregate, Top-N, limit, and offset pushdown through Spark's own JDBC V2 planner;
@@ -92,14 +93,15 @@ responsibility and is exercised when executor-side JDBC/native code loads its de
 
 ## Create a governed catalog
 
-Create a relational Gravitino catalog with provider `doris-governed`. A representative property
-set is:
+Create a relational Gravitino catalog with provider `doris-governed`. The compatible default
+profile is `hybrid`:
 
 ```properties
 jdbc-url=jdbc:mysql://doris-fe:9030/
 jdbc-driver=com.mysql.cj.jdbc.Driver
 jdbc-user=gravitino_reader
 jdbc-password=${SECRET_FROM_DEPLOYMENT_SYSTEM}
+doris-read-transport=hybrid
 doris-fenodes=doris-fe:8030
 doris-query-port=9030
 credential-providers=jdbc-user-password
@@ -107,7 +109,7 @@ doris-schema-cache-ttl-ms=30000
 doris-schema-cache-max-entries=1000
 ```
 
-Both `doris-fenodes` and `doris-query-port` are required. Connector 26.0.0 otherwise defers the
+Both `doris-fenodes` and `doris-query-port` are required by `hybrid`. Connector 26.0.0 otherwise defers the
 missing query-port failure until native scan planning, so this adapter validates it at catalog
 creation and initialization instead.
 
@@ -132,9 +134,25 @@ FE HTTP requests and MySQL/JDBC TCP connections remaining at zero. They do not p
 BE/native ports; the absence of later BE work follows from the tested ordering and the fact that no
 physical table is loaded and no table delegate, scan, or reader is constructed.
 
-This release does not provide or certify strict TLS. Structurally valid Connector/J query
-properties are accepted so a later transport profile can enforce verified TLS, but adding TLS-like
-parameters to the current catalog does not create a supported secure-transport mode.
+For a verified JDBC-only transport, omit both native endpoint properties and select the strict
+profile:
+
+```properties
+jdbc-url=jdbc:mysql://doris-fe:9030/?sslMode=VERIFY_IDENTITY
+jdbc-driver=com.mysql.cj.jdbc.Driver
+jdbc-user=gravitino_reader
+jdbc-password=${SECRET_FROM_DEPLOYMENT_SYSTEM}
+doris-read-transport=strict-jdbc-tls
+credential-providers=jdbc-user-password
+```
+
+Deploy the same trusted CA through the JVM truststore of the Gravitino Server, Spark driver, and
+every executor. The current strict contract uses Connector/J's system-truststore fallback, so keep
+`fallbackToSystemTrustStore` absent or set it exactly to `true`. Do not put a truststore location or
+password in the JDBC URL or catalog. This profile structurally excludes the native Doris catalog,
+FE HTTP schema requests, and tablet scan; physical schema and all reads use the canonical verified
+JDBC URL. The default `hybrid` profile remains non-strict because its native channel is not covered
+by this JDBC trust boundary.
 
 ## Start Spark
 
@@ -164,7 +182,8 @@ catalog has no reliable default namespace.
 
 ## Type behavior
 
-Lossless scalar values retain Catalyst types. Doris DATETIME/DATETIMEV2, ARRAY, MAP, STRUCT,
+In the compatible `hybrid` profile, lossless scalar values retain Catalyst types. Doris
+DATETIME/DATETIMEV2, ARRAY, MAP, STRUCT,
 LARGEINT, JSON/JSONB, VARIANT, IP addresses, and the verified Doris 4 wide-decimal form are exposed
 as String. BITMAP and HLL use Doris base64 functions. BINARY, VARBINARY, TIME, unsigned integer DDL,
 and the explicit legacy DECIMAL family names are probe-only because both certified Doris images
@@ -176,6 +195,11 @@ metadata. Only the matrix-listed complex, sketch, wide-decimal, JSON, VARIANT, a
 JDBC metadata is proven lossy may use the FE type as the String/base64 execution authority. An
 unlisted or future FE type fails closed instead of being silently promoted to String support. See
 the [type contract evidence matrix](docs/testing.md#type-contract-evidence).
+
+The strict profile never falls back to FE metadata. Its physical schema comes exclusively from
+JDBC `DatabaseMetaData`; the release IT exercises the lossless scalar tables used by strict reads.
+The FE-aware Doris-specific normalization matrix above remains a `hybrid` contract until each lossy
+family has an independent JDBC-only schema/value fixture.
 
 ## Build and test
 

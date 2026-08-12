@@ -96,7 +96,13 @@ val integrationTest by tasks.registering(Test::class) {
         Files.createTempDirectory(temporaryRoot, "external-jdbc-driver-").toFile().canonicalFile
     val installedExternalDriverDirectory =
         Files.createTempDirectory(temporaryRoot, "installed-jdbc-driver-").toFile().canonicalFile
-    listOf(emptyExternalDriverDirectory, installedExternalDriverDirectory).forEach {
+    val tlsFixtureDirectory =
+        Files.createTempDirectory(temporaryRoot, "verified-tls-").toFile().canonicalFile
+    listOf(
+            emptyExternalDriverDirectory,
+            installedExternalDriverDirectory,
+            tlsFixtureDirectory)
+        .forEach {
       Files.setPosixFilePermissions(it.toPath(), PosixFilePermissions.fromString("rwxr-xr-x"))
     }
     // Gravitino 1.3.0 links only mysql-connector-java-*.jar from /opt/gravitino/jdbc-drivers.
@@ -110,6 +116,7 @@ val integrationTest by tasks.registering(Test::class) {
     systemProperty(
         "connector.installed.jdbc.driver.directory",
         installedExternalDriverDirectory.absolutePath)
+    systemProperty("connector.tls.fixture.directory", tlsFixtureDirectory.absolutePath)
   }
   outputs.upToDateWhen { false }
 }

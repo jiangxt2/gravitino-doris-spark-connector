@@ -9,11 +9,12 @@
 | Detail scan | JDBC partitions only when configured | Native Doris tablet scan for lossless scalar projections |
 | Aggregate and Top-N | Spark JDBC V2 pushdown | Same Spark JDBC V2 planner through the SQL lane |
 | JDBC partition/fetch controls | Standard Spark options | Same controls exposed as governed catalog properties |
-| Doris-specific types | JDBC metadata may be lossy or unsupported | FE-aware String/base64 normalization for the explicit two-version matrix; unlisted types fail closed |
+| Doris-specific types | JDBC metadata may be lossy or unsupported | `hybrid` provides FE-aware String/base64 normalization for the explicit two-version matrix; strict remains JDBC-only |
 | DATETIME | JDBC/Catalyst conversion may depend on time zone | Doris text representation remains stable across Spark session time zones |
 | Schema drift | Physical schema only | Directional comparison with governed Gravitino metadata |
 | Writes and DDL | Provider-dependent | Explicitly rejected in the initial release |
 | Gravitino views | JDBC query text can represent a view | Not exposed by the initial table-only adapter |
+| Verified TLS | Connector/J configuration is owned by each Spark job | `strict-jdbc-tls` binds Gravitino metadata, Spark schema, and reads to one `VERIFY_IDENTITY` JDBC URL |
 
 ## Performance interpretation
 
@@ -40,7 +41,14 @@ aggregate pushdown and Doris returns the reduced result.
 | `numPartitions` | `doris-jdbc-num-partitions` |
 | `fetchsize` | `doris-jdbc-fetch-size` |
 
-Also configure both required native-lane properties: `doris-fenodes` and `doris-query-port`.
+For hybrid/native behavior, configure both `doris-fenodes` and `doris-query-port`. For a direct
+JDBC-style security boundary, select `doris-read-transport=strict-jdbc-tls`, add
+`sslMode=VERIFY_IDENTITY` to `jdbc-url`, omit both native endpoint properties, and deploy the same
+CA truststore to Gravitino, the Spark driver, and every executor.
+
+Choose `hybrid` when the documented FE-aware Doris-specific type matrix is required. Choose strict
+for the single verified JDBC trust chain and only after validating that the table's schema is
+losslessly represented by JDBC metadata; strict never consults FE HTTP to recover a lossy type.
 
 ## Support statement
 

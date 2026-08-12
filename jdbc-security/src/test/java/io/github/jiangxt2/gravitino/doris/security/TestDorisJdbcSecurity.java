@@ -78,7 +78,57 @@ public class TestDorisJdbcSecurity {
         "detectCustomCollations",
         "allowLoadLocalInfile",
         "allowUrlInLocalInfile",
-        "allowLoadLocalInfileInPath"
+        "allowLoadLocalInfileInPath",
+        "propertiesTransform",
+        "socketFactory",
+        "protocol",
+        "connectionLifecycleInterceptors",
+        "exceptionInterceptors",
+        "profilerEventHandler",
+        "clientInfoProvider",
+        "serverConfigCacheFactory",
+        "queryInfoCacheFactory",
+        "parseInfoCacheFactory",
+        "logger",
+        "useConfigs",
+        "defaultAuthenticationPlugin",
+        "disabledAuthenticationPlugins",
+        "authenticationPlugins",
+        "authenticationFidoCallbackHandler",
+        "loadBalanceExceptionChecker",
+        "dnsSrv",
+        "ha.loadBalanceStrategy",
+        "haLoadBalanceStrategy",
+        "ha.enableJMX",
+        "haEnableJMX",
+        "clientCertificateKeyStoreUrl",
+        "clientCertificateKeyStoreType",
+        "clientCertificateKeyStorePassword",
+        "fallbackToSystemKeyStore",
+        "serverRSAPublicKeyFile",
+        "ociConfigFile",
+        "ociConfigProfile",
+        "ldapServerHostname",
+        "allowPublicKeyRetrieval",
+        "localSocketAddress",
+        "autoGenerateTestcaseScript",
+        "dumpQueriesOnException",
+        "enablePacketDebug",
+        "explainSlowQueries",
+        "includeInnodbStatusInDeadlockExceptions",
+        "includeThreadDumpInDeadlockExceptions",
+        "includeThreadNamesAsStatementComment",
+        "gatherPerfMetrics",
+        "logXaCommands",
+        "logSlowQueries",
+        "profileSQL",
+        "traceProtocol",
+        "useUsageAdvisor",
+        "socksProxyHost",
+        "socksProxyPort",
+        "socksProxyRemoteDns",
+        "createDatabaseIfNotExist",
+        "sessionVariables"
       })
   void rejectsEveryUnsafeMysqlParameterInUrlAndRawConfig(String parameter) {
     assertThatThrownBy(
@@ -92,6 +142,21 @@ public class TestDorisJdbcSecurity {
     Map<String, String> properties = validServerProperties();
     properties.put("gravitino.bypass." + parameter.toUpperCase(Locale.ROOT), "true");
     assertThatThrownBy(() -> DorisJdbcSecurity.validateServerCatalogProperties(properties))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("Unsafe Doris JDBC parameter")
+        .hasMessageContaining(parameter);
+
+    Map<String, String> direct = validServerProperties();
+    direct.put(parameter.toUpperCase(Locale.ROOT), "true");
+    assertThatThrownBy(() -> DorisJdbcSecurity.validateServerCatalogProperties(direct))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("Unsafe Doris JDBC parameter")
+        .hasMessageContaining(parameter);
+
+    Map<String, String> connectionProperties = validServerProperties();
+    connectionProperties.put("gravitino.bypass.connectionProperties", parameter + "=true");
+    assertThatThrownBy(
+            () -> DorisJdbcSecurity.validateServerCatalogProperties(connectionProperties))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("Unsafe Doris JDBC parameter")
         .hasMessageContaining(parameter);
@@ -228,6 +293,123 @@ public class TestDorisJdbcSecurity {
   }
 
   @Test
+  void acceptsStrictVerifiedIdentityWithoutNativeEndpoints() {
+    Map<String, String> properties = strictServerProperties();
+
+    assertThatCode(() -> DorisJdbcSecurity.validateServerCatalogProperties(properties))
+        .doesNotThrowAnyException();
+
+    properties.put("jdbc-url", properties.get("jdbc-url") + "&fallbackToSystemTrustStore=true");
+    assertThatCode(() -> DorisJdbcSecurity.validateServerCatalogProperties(properties))
+        .doesNotThrowAnyException();
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "jdbc:mysql://fe:9030/",
+        "jdbc:mysql://fe:9030/?sslMode=PREFERRED",
+        "jdbc:mysql://fe:9030/?sslMode=REQUIRED",
+        "jdbc:mysql://fe:9030/?sslMode=VERIFY_CA",
+        "jdbc:mysql://fe:9030/?sslMode=verify_identity",
+        "jdbc:mysql://fe:9030/?sslMode=VERIFY_IDENTITY&fallbackToSystemTrustStore=false",
+        "jdbc:mysql://fe:9030/?sslMode=VERIFY_IDENTITY&useSSL=true",
+        "jdbc:mysql://fe:9030/?sslMode=VERIFY_IDENTITY&requireSSL=true",
+        "jdbc:mysql://fe:9030/?sslMode=VERIFY_IDENTITY&verifyServerCertificate=true",
+        "jdbc:mysql://fe:9030/?sslMode=VERIFY_IDENTITY&trustCertificateKeyStoreUrl=file:test",
+        "jdbc:mysql://fe:9030/?sslMode=VERIFY_IDENTITY&trustCertificateKeyStoreType=PKCS12",
+        "jdbc:mysql://fe:9030/?sslMode=VERIFY_IDENTITY&trustCertificateKeyStorePassword=secret-canary",
+        "jdbc:mysql://fe:9030/?sslMode=VERIFY_IDENTITY&sslTrustStorePassword=secret-canary",
+        "jdbc:mysql://fe:9030/?sslMode=VERIFY_IDENTITY&enabledTLSProtocols=TLSv1.2",
+        "jdbc:mysql://fe:9030/?sslMode=VERIFY_IDENTITY&propertiesTransform=example.Transform",
+        "jdbc:mysql://fe:9030/?sslMode=VERIFY_IDENTITY&socketFactory=example.SocketFactory",
+        "jdbc:mysql://fe:9030/?sslMode=VERIFY_IDENTITY&protocol=PIPE",
+        "jdbc:mysql://fe:9030/?sslMode=VERIFY_IDENTITY&useConfigs=serverPerformance",
+        "jdbc:mysql://fe:9030/?sslMode=VERIFY_IDENTITY&parseInfoCacheFactory=example.CacheFactory",
+        "jdbc:mysql://fe:9030/?sslMode=VERIFY_IDENTITY&haLoadBalanceStrategy=example.Strategy",
+        "jdbc:mysql://fe:9030/?sslMode=VERIFY_IDENTITY&password1=secret-canary",
+        "jdbc:mysql://fe:9030/?sslMode=VERIFY_IDENTITY&socksProxyHost=proxy.example",
+        "jdbc:mysql://fe:9030/?sslMode=VERIFY_IDENTITY&createDatabaseIfNotExist=true"
+      })
+  void rejectsWeakConflictingOrPersistentStrictTlsParameters(String url) {
+    Map<String, String> properties = strictServerProperties();
+    properties.put("jdbc-url", url);
+
+    assertThatThrownBy(() -> DorisJdbcSecurity.validateServerCatalogProperties(properties))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageNotContaining("secret-canary")
+        .hasMessageNotContaining(url);
+  }
+
+  @Test
+  void doesNotEchoSecretMaterialEmbeddedInTlsPropertyNames() {
+    Map<String, String> urlProperties = strictServerProperties();
+    urlProperties.put(
+        "jdbc-url", urlProperties.get("jdbc-url") + "&sslTrustStore-secret-canary=value");
+    assertThatThrownBy(() -> DorisJdbcSecurity.validateServerCatalogProperties(urlProperties))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageNotContaining("secret-canary");
+
+    Map<String, String> bypassProperties = strictServerProperties();
+    bypassProperties.put("gravitino.bypass.trustStore-secret-canary", "value");
+    assertThatThrownBy(() -> DorisJdbcSecurity.validateServerCatalogProperties(bypassProperties))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageNotContaining("secret-canary");
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "doris-fenodes",
+        "doris-query-port",
+        "gravitino.bypass.sslMode",
+        "gravitino.bypass.connectionProperties",
+        "spark.bypass.doris.fenodes"
+      })
+  void rejectsNativeOrTlsBypassConfigurationInStrictTransport(String property) {
+    Map<String, String> properties = strictServerProperties();
+    String value =
+        "gravitino.bypass.connectionProperties".equals(property)
+            ? "fallbackToSystemTrustStore=false"
+            : "secret-canary";
+    properties.put(property, value);
+
+    assertThatThrownBy(() -> DorisJdbcSecurity.validateServerCatalogProperties(properties))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageNotContaining("secret-canary");
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"", "HYBRID", " hybrid", "hybrid ", "strict", "STRICT-JDBC-TLS"})
+  void rejectsUnknownOrNonCanonicalTransportValues(String transport) {
+    Map<String, String> properties = validServerProperties();
+    properties.put(DorisJdbcSecurity.READ_TRANSPORT, transport);
+
+    assertThatThrownBy(() -> DorisJdbcSecurity.validateServerCatalogProperties(properties))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(DorisJdbcSecurity.READ_TRANSPORT);
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "DORIS-READ-TRANSPORT",
+        "doris%2Dread%2Dtransport",
+        "DORIS-FENODES",
+        "doris%2Dquery%2Dport"
+      })
+  void rejectsNonCanonicalProfilePropertyNames(String property) {
+    Map<String, String> properties = validServerProperties();
+    String canonical = property.toLowerCase(Locale.ROOT).replace("%2d", "-");
+    String value = properties.remove(canonical);
+    properties.put(property, value);
+
+    assertThatThrownBy(() -> DorisJdbcSecurity.validateServerCatalogProperties(properties))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(canonical);
+  }
+
+  @Test
   void decodesUnsafeNamesRecursivelyAndRejectsExcessiveEncoding() {
     assertThatThrownBy(
             () ->
@@ -239,6 +421,22 @@ public class TestDorisJdbcSecurity {
                 DorisJdbcSecurity.validateConnection(
                     "jdbc:mysql://fe:9030/?auto%252525252544eserialize=true", DRIVER))
         .hasMessage("Doris JDBC URL encoding is invalid");
+  }
+
+  @Test
+  void decodesStrictTlsValuesBeforeExactMatching() {
+    Map<String, String> encodedIdentity = strictServerProperties();
+    encodedIdentity.put("jdbc-url", "jdbc:mysql://fe:9030/?sslMode=VERIFY%5FIDENTITY");
+    assertThatCode(() -> DorisJdbcSecurity.validateServerCatalogProperties(encodedIdentity))
+        .doesNotThrowAnyException();
+
+    Map<String, String> encodedWeakFallback = strictServerProperties();
+    encodedWeakFallback.put(
+        "jdbc-url",
+        "jdbc:mysql://fe:9030/?sslMode=VERIFY_IDENTITY&fallbackToSystemTrustStore=%66alse");
+    assertThatThrownBy(() -> DorisJdbcSecurity.validateServerCatalogProperties(encodedWeakFallback))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("fallbackToSystemTrustStore");
   }
 
   @Test
@@ -279,6 +477,10 @@ public class TestDorisJdbcSecurity {
         "jdbc:mysql://user:secret@fe:9030/",
         "jdbc:mysql://fe:9030/?user=reader",
         "jdbc:mysql://fe:9030/?password=secret",
+        "jdbc:mysql://fe:9030/?password1=secret",
+        "jdbc:mysql://fe:9030/?password2=secret",
+        "jdbc:mysql://fe:9030/?password3=secret",
+        "jdbc:mysql://fe:9030/?PASSWORD1=secret",
         "jdbc:mysql://fe:9030/?safe=true&safe=false",
         "jdbc:mysql://fe:9030/?=value",
         "jdbc:mysql://fe:9030/?safe",
@@ -310,7 +512,23 @@ public class TestDorisJdbcSecurity {
         "auto%2544eserialize=true",
         "password=secret-canary",
         "driverClassName=example.SecretCanary",
-        "bad\\" + "u12G4=secret-canary");
+        "bad\\" + "u12G4=secret-canary",
+        "socketTimeout=1;propertiesTransform=example.Transform",
+        "socketTimeout=1;socketFactory=example.SocketFactory",
+        "socketTimeout=1;logger=example.Logger",
+        "socketTimeout=1;queryInfoCacheFactory=example.CacheFactory",
+        "socketTimeout=1;parseInfoCacheFactory=example.CacheFactory",
+        "socketTimeout=1;protocol=PIPE",
+        "socketTimeout=1;useConfigs=serverPerformance",
+        "socketTimeout=1;ha.loadBalanceStrategy=example.Strategy",
+        "socketTimeout=1;haLoadBalanceStrategy=example.Strategy",
+        "socketTimeout=1;password1=secret-canary",
+        "socketTimeout=1;password2=secret-canary",
+        "socketTimeout=1;password3=secret-canary",
+        "socketTimeout=1;clientCertificateKeyStorePassword=secret-canary",
+        "socketTimeout=1;socksProxyHost=proxy.example",
+        "socketTimeout=1;createDatabaseIfNotExist=true",
+        "socketTimeout=1;sessionVariables=time_zone='+00:00'");
   }
 
   private static Map<String, String> validServerProperties() {
@@ -319,6 +537,18 @@ public class TestDorisJdbcSecurity {
     properties.put("jdbc-driver", DRIVER);
     properties.put("jdbc-user", "reader");
     properties.put("jdbc-password", "secret-canary");
+    properties.put("doris-fenodes", "fe:8030");
+    properties.put("doris-query-port", "9030");
+    return properties;
+  }
+
+  private static Map<String, String> strictServerProperties() {
+    Map<String, String> properties = new HashMap<>();
+    properties.put("jdbc-url", "jdbc:mysql://fe:9030/?sslMode=VERIFY_IDENTITY");
+    properties.put("jdbc-driver", DRIVER);
+    properties.put("jdbc-user", "reader");
+    properties.put("jdbc-password", "secret-canary");
+    properties.put(DorisJdbcSecurity.READ_TRANSPORT, DorisJdbcSecurity.STRICT_JDBC_TLS_TRANSPORT);
     return properties;
   }
 }

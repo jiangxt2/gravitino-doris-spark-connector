@@ -18,6 +18,7 @@ import static java.lang.String.format;
 import static org.testcontainers.shaded.org.awaitility.Awaitility.await;
 
 import java.io.File;
+import java.io.IOException;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -47,18 +48,26 @@ final class DorisTestCluster implements AutoCloseable {
   private static final int FE_MYSQL_PORT = 9030;
   private static final int BE_HTTP_PORT = 8040;
   private static final int BE_HEARTBEAT_PORT = 9050;
+  private static final String EXPIRED_CERTIFICATE = "/tmp/expired-server-certificate.p12";
+  private static final String UNKNOWN_CA_CERTIFICATE = "/tmp/unknown-ca-server-certificate.p12";
 
   private final DockerTestNetwork network;
   private final String version;
+  private final TlsTestCertificates tlsCertificates;
   private final ComposeContainer compose;
   private String internalFeAddress;
   private String hostFeAddress;
   private int hostHttpPort;
   private int hostMysqlPort;
 
-  DorisTestCluster(DockerTestNetwork network, String version, Path repositoryRoot) {
+  DorisTestCluster(
+      DockerTestNetwork network,
+      String version,
+      Path repositoryRoot,
+      TlsTestCertificates tlsCertificates) {
     this.network = network;
     this.version = version;
+    this.tlsCertificates = tlsCertificates;
     Path resources =
         repositoryRoot.resolve("integration-tests/src/integrationTest/resources/doris");
     File composeFile = resources.resolve("docker-compose.yaml").toFile();
@@ -68,6 +77,7 @@ final class DorisTestCluster implements AutoCloseable {
             .withEnv("GOVERNED_DORIS_FE_IMAGE", "apache/doris:fe-" + version)
             .withEnv("GOVERNED_DORIS_BE_IMAGE", "apache/doris:be-" + version)
             .withEnv("GOVERNED_DORIS_NETWORK_NAME", network.name())
+            .withEnv("GOVERNED_DORIS_ENABLE_TLS", Boolean.toString(tlsCertificates != null))
             .withExposedService(
                 FE_SERVICE,
                 FE_MYSQL_PORT,
@@ -83,9 +93,17 @@ final class DorisTestCluster implements AutoCloseable {
             .withStartupTimeout(Duration.ofMinutes(4))
             .withTailChildContainers(true)
             .withLocalCompose(true);
+    if (tlsCertificates != null) {
+      compose.withEnv(
+          "GOVERNED_DORIS_TLS_FIXTURE_DIRECTORY",
+          tlsCertificates.feDirectory().toAbsolutePath().toString());
+    }
   }
 
   void start() {
+    if (tlsCertificates != null) {
+      tlsCertificates.generate();
+    }
     compose.start();
     assertProjectLabel(FE_SERVICE);
     assertProjectLabel(BE_SERVICE);
@@ -114,12 +132,83 @@ final class DorisTestCluster implements AutoCloseable {
     return format("jdbc:mysql://%s:%d/", internalFeAddress, FE_MYSQL_PORT);
   }
 
+  String internalStrictJdbcUrl() {
+    return internalJdbcUrl() + "?sslMode=VERIFY_IDENTITY";
+  }
+
+  String hostStrictJdbcUrl() {
+    return hostJdbcUrl() + "?sslMode=VERIFY_IDENTITY";
+  }
+
   String hostFeEndpoint() {
     return format("%s:%d", hostFeAddress, hostHttpPort);
   }
 
   int hostMysqlPort() {
     return hostMysqlPort;
+  }
+
+  void installExpiredCertificate() {
+    if (tlsCertificates == null) {
+      throw new IllegalStateException("Doris TLS is not enabled for this test cluster");
+    }
+    requireContainer(FE_SERVICE)
+        .copyFileToContainer(
+            org.testcontainers.utility.MountableFile.forHostPath(
+                tlsCertificates
+                    .feDirectory()
+                    .resolve("expired-server-certificate.p12")
+                    .toAbsolutePath()),
+            EXPIRED_CERTIFICATE);
+    org.testcontainers.containers.Container.ExecResult restart =
+        restartFe(
+            "enable_ssl = true", "mysql_ssl_default_server_certificate = " + EXPIRED_CERTIFICATE);
+    if (restart.getExitCode() != 0) {
+      throw new IllegalStateException("Unable to restart the Doris FE with expired TLS fixture");
+    }
+    await()
+        .atMost(2, TimeUnit.MINUTES)
+        .pollInterval(2, TimeUnit.SECONDS)
+        .until(this::mysqlPortAcceptingConnections);
+  }
+
+  void installUnknownCaCertificate() {
+    if (tlsCertificates == null) {
+      throw new IllegalStateException("Doris TLS is not enabled for this test cluster");
+    }
+    requireContainer(FE_SERVICE)
+        .copyFileToContainer(
+            org.testcontainers.utility.MountableFile.forHostPath(
+                tlsCertificates
+                    .feDirectory()
+                    .resolve("unknown-ca-server-certificate.p12")
+                    .toAbsolutePath()),
+            UNKNOWN_CA_CERTIFICATE);
+    org.testcontainers.containers.Container.ExecResult restart =
+        restartFe(
+            "enable_ssl = true",
+            "mysql_ssl_default_server_certificate = " + UNKNOWN_CA_CERTIFICATE);
+    if (restart.getExitCode() != 0) {
+      throw new IllegalStateException("Unable to restart the Doris FE with unknown CA fixture");
+    }
+    await()
+        .atMost(2, TimeUnit.MINUTES)
+        .pollInterval(2, TimeUnit.SECONDS)
+        .until(this::mysqlPortAcceptingConnections);
+  }
+
+  void disableTls() {
+    if (tlsCertificates == null) {
+      throw new IllegalStateException("Doris TLS is not enabled for this test cluster");
+    }
+    org.testcontainers.containers.Container.ExecResult restart = restartFe("enable_ssl = false");
+    if (restart.getExitCode() != 0) {
+      throw new IllegalStateException("Unable to restart the Doris FE without TLS");
+    }
+    await()
+        .atMost(2, TimeUnit.MINUTES)
+        .pollInterval(2, TimeUnit.SECONDS)
+        .until(this::mysqlPortAcceptingConnections);
   }
 
   @Override
@@ -142,6 +231,39 @@ final class DorisTestCluster implements AutoCloseable {
     } catch (Exception e) {
       LOG.info("Waiting for Doris {} backend readiness: {}", version, e.getClass().getSimpleName());
       return false;
+    }
+  }
+
+  private boolean mysqlPortAcceptingConnections() {
+    try (java.net.Socket socket = new java.net.Socket()) {
+      socket.connect(new java.net.InetSocketAddress(hostFeAddress, hostMysqlPort), 1000);
+      return true;
+    } catch (IOException e) {
+      return false;
+    }
+  }
+
+  private org.testcontainers.containers.Container.ExecResult restartFe(String... configLines) {
+    StringBuilder command = new StringBuilder();
+    for (String configLine : configLines) {
+      if (!configLine.matches("[A-Za-z0-9_ ./=-]+")) {
+        throw new IllegalArgumentException("Doris FE test configuration is invalid");
+      }
+      command
+          .append("echo '")
+          .append(configLine)
+          .append("' >> /opt/apache-doris/fe/conf/fe.conf && ");
+    }
+    command
+        .append("/opt/apache-doris/fe/bin/stop_fe.sh && ")
+        .append("/opt/apache-doris/fe/bin/start_fe.sh --daemon");
+    try {
+      return requireContainer(FE_SERVICE).execInContainer("bash", "-c", command.toString());
+    } catch (IOException e) {
+      throw new IllegalStateException("Unable to restart the Doris FE", e);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new IllegalStateException("Interrupted while restarting the Doris FE", e);
     }
   }
 

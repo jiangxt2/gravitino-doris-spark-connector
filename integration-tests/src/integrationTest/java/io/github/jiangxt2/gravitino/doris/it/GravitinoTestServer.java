@@ -34,11 +34,20 @@ final class GravitinoTestServer implements AutoCloseable {
   private static final int HTTP_PORT = 8090;
   private static final String CATALOG_DIRECTORY = "/opt/gravitino/catalogs/doris-governed";
   private static final String JDBC_DRIVER_DIRECTORY = "/opt/gravitino/jdbc-drivers";
+  private static final String TLS_DIRECTORY = "/opt/gravitino/verified-tls";
 
   private final GenericContainer<?> container;
 
   GravitinoTestServer(
       DockerTestNetwork network, Path providerDirectory, Path externalDriverDirectory) {
+    this(network, providerDirectory, externalDriverDirectory, null);
+  }
+
+  GravitinoTestServer(
+      DockerTestNetwork network,
+      Path providerDirectory,
+      Path externalDriverDirectory,
+      TlsTestCertificates tlsCertificates) {
     if (!Files.isDirectory(externalDriverDirectory)) {
       throw new IllegalArgumentException("The external JDBC driver directory must exist");
     }
@@ -63,6 +72,19 @@ final class GravitinoTestServer implements AutoCloseable {
                     .forStatusCode(200)
                     .withStartupTimeout(Duration.ofMinutes(3)))
             .withLogConsumer(new Slf4jLogConsumer(LOG).withPrefix("gravitino-1.3.0"));
+    if (tlsCertificates != null) {
+      container
+          .withFileSystemBind(
+              tlsCertificates.clientDirectory().toAbsolutePath().toString(),
+              TLS_DIRECTORY,
+              BindMode.READ_ONLY)
+          .withEnv(
+              "JAVA_OPTS",
+              "-Djavax.net.ssl.trustStore="
+                  + TLS_DIRECTORY
+                  + "/client-truststore.jks"
+                  + " -Djavax.net.ssl.trustStoreType=JKS");
+    }
   }
 
   void start() {

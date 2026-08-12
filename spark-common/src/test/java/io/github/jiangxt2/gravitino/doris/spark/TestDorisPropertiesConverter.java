@@ -90,6 +90,63 @@ public class TestDorisPropertiesConverter {
   }
 
   @Test
+  void testStrictProfileRejectsNativeEndpointsAndOptions() {
+    Map<String, String> strict =
+        ImmutableMap.of(
+            DorisConnectorConstants.READ_TRANSPORT,
+            DorisConnectorConstants.STRICT_JDBC_TLS_TRANSPORT);
+
+    assertEquals(
+        ImmutableMap.of(),
+        converter.toSparkCatalogProperties(
+            new CaseInsensitiveStringMap(ImmutableMap.of()), strict));
+
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            converter.toSparkCatalogProperties(
+                new CaseInsensitiveStringMap(ImmutableMap.of()),
+                ImmutableMap.of(
+                    DorisConnectorConstants.READ_TRANSPORT,
+                    DorisConnectorConstants.STRICT_JDBC_TLS_TRANSPORT,
+                    DorisConnectorConstants.GRAVITINO_DORIS_FE_NODES,
+                    "fe:8030")));
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            converter.toSparkCatalogProperties(
+                new CaseInsensitiveStringMap(
+                    ImmutableMap.of("doris.request.connect.timeout.ms", "1000")),
+                strict));
+  }
+
+  @Test
+  void testTransportProfileCannotBeOverriddenBySparkOrBypassOptions() {
+    Map<String, String> strict =
+        ImmutableMap.of(
+            DorisConnectorConstants.READ_TRANSPORT,
+            DorisConnectorConstants.STRICT_JDBC_TLS_TRANSPORT);
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            converter.toSparkCatalogProperties(
+                new CaseInsensitiveStringMap(
+                    ImmutableMap.of(DorisConnectorConstants.READ_TRANSPORT, "hybrid")),
+                strict));
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            converter.toSparkCatalogProperties(
+                new CaseInsensitiveStringMap(ImmutableMap.of()),
+                ImmutableMap.of(
+                    DorisConnectorConstants.READ_TRANSPORT,
+                    DorisConnectorConstants.STRICT_JDBC_TLS_TRANSPORT,
+                    PropertiesConverter.SPARK_PROPERTY_PREFIX
+                        + DorisConnectorConstants.READ_TRANSPORT,
+                    "hybrid")));
+  }
+
+  @Test
   void testValidatesFeNodesAndPorts() {
     assertThrows(
         IllegalArgumentException.class,

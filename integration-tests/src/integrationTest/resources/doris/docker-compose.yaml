@@ -34,12 +34,18 @@ services:
       # metadata environment (apache/doris#60536). Disable container support
       # only for the test FE; the runner applies no memory limit.
       JAVA_TOOL_OPTIONS: "-XX:-UseContainerSupport"
+      GOVERNED_DORIS_ENABLE_TLS: ${GOVERNED_DORIS_ENABLE_TLS:-false}
     ports:
       - "8030"
       - "9030"
     volumes:
       - ./start-fe.sh:/opt/apache-doris/start-fe.sh
+      - ${GOVERNED_DORIS_TLS_FIXTURE_DIRECTORY:-./empty-tls-fixture}:/opt/apache-doris/tls-fixture:ro
     command: ["start-fe.sh"]
+    networks:
+      default:
+        aliases:
+          - doris-fe-mismatch
     healthcheck:
       test: ["CMD", "bash", "-c", "curl -s http://localhost:8030/api/bootstrap | grep -q '\"msg\":\"success\"'"]
       interval: 10s

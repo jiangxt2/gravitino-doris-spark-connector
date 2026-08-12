@@ -8,8 +8,9 @@
 | `jdbc-driver` | yes | Must be exactly `com.mysql.cj.jdbc.Driver` |
 | `jdbc-user` | yes | Hidden technical-user property used by credential vending |
 | `jdbc-password` | yes | Hidden technical-user password; an empty Doris password is valid |
-| `doris-fenodes` | yes | Comma-separated `host:httpPort` FE endpoints |
-| `doris-query-port` | yes | FE MySQL query port required by Connector 26.0.0 native planning |
+| `doris-read-transport` | no | `hybrid` (default) or `strict-jdbc-tls` |
+| `doris-fenodes` | hybrid only | Comma-separated `host:httpPort` FE endpoints; rejected by strict profile |
+| `doris-query-port` | hybrid only | FE MySQL query port; rejected by strict profile |
 | `credential-providers` | no | Explicitly set `jdbc-user-password`; JDBC catalogs also add it automatically |
 
 The FE endpoint parser accepts optional whitespace around commas, validates every `host:port`, and
@@ -61,10 +62,43 @@ URL user-info, query credentials, fragments, malformed percent encoding, and val
 converge after bounded recursive decoding. JDBC credentials must come only from Gravitino's hidden
 `jdbc-user`/`jdbc-password` properties and credential vending.
 
-The following Connector/J parameter names are rejected case-insensitively wherever the driver
-could receive them: `maxAllowedPacket`, `autoDeserialize`, `queryInterceptors`,
-`statementInterceptors`, `detectCustomCollations`, `allowLoadLocalInfile`,
-`allowUrlInLocalInfile`, and `allowLoadLocalInfileInPath`.
+The following Connector/J parameter families are rejected case-insensitively, including
+percent-encoded and camel-case alias variants, wherever the driver could receive them (URL query,
+raw catalog properties, `gravitino.bypass.*`, and `connectionProperties`). The list is the
+fixed Connector/J 8.0.33 audit result for class loading, credential/file loading, endpoint
+routing, connection-time side effects, and diagnostic disclosure. Other structurally valid,
+ordinary Connector/J parameters remain compatible in `hybrid`; `strict-jdbc-tls` additionally
+rejects every unreviewed TLS control rather than silently accepting it:
+
+- file/stream and deserialization sinks: `maxAllowedPacket`, `autoDeserialize`,
+  `detectCustomCollations`, `allowLoadLocalInfile`, `allowUrlInLocalInfile`,
+  `allowLoadLocalInfileInPath`;
+- class loading, interceptors, and configuration expansion: `queryInterceptors`,
+  `statementInterceptors`, `propertiesTransform`, `socketFactory`, `protocol`,
+  `connectionLifecycleInterceptors`, `exceptionInterceptors`, `profilerEventHandler`,
+  `clientInfoProvider`, `serverConfigCacheFactory`, `queryInfoCacheFactory`,
+  `parseInfoCacheFactory`, `logger`, `useConfigs`, `defaultAuthenticationPlugin`,
+  `disabledAuthenticationPlugins`, `authenticationPlugins`, `authenticationFidoCallbackHandler`,
+  `loadBalanceExceptionChecker`, `ociConfigFile`, `ociConfigProfile`, `ldapServerHostname`,
+  `serverRSAPublicKeyFile`, `allowPublicKeyRetrieval`;
+- network path and endpoint routing: `dnsSrv`, `socksProxyHost`, `socksProxyPort`,
+  `socksProxyRemoteDns`, `localSocketAddress`,
+  `ha.loadBalanceStrategy`/`haLoadBalanceStrategy`,
+  `ha.enableJMX`/`haEnableJMX`;
+- connection-time side effects outside the read-only boundary: `createDatabaseIfNotExist`,
+  `sessionVariables`;
+- diagnostic disclosure outside the redaction boundary: `autoGenerateTestcaseScript`,
+  `dumpQueriesOnException`, `enablePacketDebug`, `explainSlowQueries`,
+  `includeInnodbStatusInDeadlockExceptions`, `includeThreadDumpInDeadlockExceptions`,
+  `includeThreadNamesAsStatementComment`, `gatherPerfMetrics`, `logXaCommands`, `logSlowQueries`,
+  `profileSQL`, `traceProtocol`, `useUsageAdvisor`;
+- client keystore and persistent secrets: `clientCertificateKeyStoreUrl`,
+  `clientCertificateKeyStoreType`, `clientCertificateKeyStorePassword`,
+  `fallbackToSystemKeyStore`.
+
+JDBC credentials (`user`, `username`, `password`, and the MFA passwords `password1`-`password3`)
+must never appear in any connection configuration; they come only from Gravitino's hidden
+`jdbc-user`/`jdbc-password` properties and credential vending.
 
 Raw and `gravitino.bypass.*` configuration also reject DBCP class-loading properties
 `connectionFactoryClassName`, `evictionPolicyClassName`, and `driverClassName`; identity overrides
@@ -78,13 +112,35 @@ A `connectionProperties` value is parsed once with the same semicolon/newline an
 `connectionProperties` name and unparseable input fail closed. Errors name only a fixed rule or
 known denied parameter and do not echo the URL, host, credential, or property value.
 
-## Transport limitation
+## Read transport profiles
 
-The current release does not enforce or certify TLS for either the Gravitino metadata connection or
-Spark's SQL/native execution lanes. The URL parser permits structurally valid safe query properties
-so a future verified transport profile can be added, but current TLS-looking options are not a
-supported strict-TLS contract. Do not claim confidentiality, server-identity verification, or
-downgrade protection from this release.
+`hybrid` keeps the native tablet lane plus Spark JDBC V2 SQL lane and requires both native endpoint
+properties. It is the compatibility default and is not a strict TLS claim: the two endpoint sets
+are not identity-bound, and Connector 26.0.0's native HTTPS behavior is outside this verified JDBC
+contract.
+
+`strict-jdbc-tls` is JDBC-only. It requires exactly one canonical `sslMode=VERIFY_IDENTITY`, rejects
+native endpoints/options, and never initializes the official Doris native catalog or FE HTTP schema
+client. Gravitino metadata, Spark physical schema, and Spark reads all use `jdbc-url`.
+`fallbackToSystemTrustStore` may be omitted (Connector/J 8.0.33 defaults it to `true`) or supplied
+once with the exact value `true`; `false` is rejected.
+
+Strict URL TLS controls are fail closed:
+
+| Parameter family | Contract |
+| --- | --- |
+| `sslMode` | exactly once, exact value `VERIFY_IDENTITY` |
+| `fallbackToSystemTrustStore` | absent or exact value `true` |
+| `trustCertificateKeyStoreUrl/Password/Type` | rejected; URL/catalog persistence is not a secret boundary |
+| `useSSL`, `requireSSL`, `verifyServerCertificate` | rejected legacy controls |
+| `sslTrustStore*` and any other unreviewed TLS/keystore/certificate control | rejected |
+
+Install the private/public CA chain in a read-only JVM truststore on the Gravitino Server, Spark
+driver, and every executor. Configure it as JVM startup state, for example with
+`-Djavax.net.ssl.trustStore`, `-Djavax.net.ssl.trustStoreType`, and a deployment-secret source for
+the password. Never place the truststore password or path in `jdbc-url`, a Gravitino property,
+Spark option, log, or plan. The certificate SAN must match the single host in `jdbc-url`; an IP URL
+therefore requires an IP SAN.
 
 ## SQL-lane performance properties
 
@@ -114,29 +170,34 @@ loads the new values.
 | `doris-schema-cache-ttl-ms` | `30000` | non-negative; zero disables the catalog cache |
 | `doris-schema-cache-max-entries` | `1000` | positive integer |
 
-Each returned table wrapper owns its validated snapshot. The catalog cache reduces repeated FE
-requests across wrapper instances. Authorization and logical-schema comparison still run on every
-load, including a cache hit. A cache entry contains the Catalyst fields and their corresponding FE
-type names as one immutable snapshot. A compatible hit performs no FE request. If current logical
-metadata is incompatible with a cached snapshot, the catalog conditionally replaces that exact
-entry with one coalesced fresh FE load and validates once more. This is a single stale-hit
-revalidation, not a general retry: an initial or refreshed mismatch fails closed, and load errors
-are not retried. `REFRESH TABLE` and catalog `invalidateTable` evict only the target table; TTL
-expiry reloads the complete snapshot. A zero TTL performs a fresh load every time and does not
-retain stale physical schema state.
+Each returned table wrapper owns its validated snapshot. The catalog cache reduces repeated
+physical-metadata requests across wrapper instances: FE HTTP for `hybrid`, JDBC metadata for
+`strict-jdbc-tls`. Authorization and logical-schema comparison still run on every load, including a
+cache hit. A cache entry contains the Catalyst fields and their corresponding physical type names
+as one immutable snapshot. A compatible hit performs no physical-metadata request. If current
+logical metadata is incompatible with a cached snapshot, the catalog conditionally replaces that
+exact entry with one coalesced fresh transport-specific load and validates once more. This is a
+single stale-hit revalidation, not a general retry: an initial or refreshed mismatch fails closed,
+and load errors are not retried. `REFRESH TABLE` and catalog `invalidateTable` evict only the target
+table; TTL expiry reloads the complete snapshot. A zero TTL performs a fresh load every time and
+does not retain stale physical schema state.
 
 ## Allowed native read tuning
 
-The adapter allows only known read-side `doris.*` options, including connection/request timeouts,
-retries, tablet size, batch size, memory limit, IN threshold, and thrift message size. Unknown
-options fail closed rather than silently reaching a third-party connector.
+The hybrid adapter allows only known read-side `doris.*` options, including connection/request
+timeouts, retries, tablet size, batch size, memory limit, IN threshold, and thrift message size.
+Unknown options fail closed rather than silently reaching a third-party connector.
+
+These options configure only the native Doris reader. The strict profile rejects them instead of
+silently ignoring them; strict JDBC partition and fetch-size tuning uses the properties above.
 
 The following keys are protected regardless of whether they came from Spark catalog options or a
 Gravitino `spark.bypass.*` property:
 
 - `doris.fenodes`, `doris.query.port`, `doris.user`, `doris.password`;
 - JDBC URL, driver, user, and password;
-- generated `dbtable`/query values.
+- generated `dbtable`/query values;
+- `doris-read-transport`.
 
 ## Credential lifecycle
 

@@ -17,6 +17,7 @@ package io.github.jiangxt2.gravitino.doris.spark;
 import io.github.jiangxt2.gravitino.doris.security.DorisJdbcSecurity;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Supplier;
 import org.apache.gravitino.NameIdentifier;
 import org.apache.gravitino.authorization.Privilege;
 import org.apache.gravitino.credential.JdbcCredential;
@@ -198,14 +199,14 @@ public abstract class GovernedDorisCatalog extends GravitinoJdbcCatalog {
       PropertiesConverter propertiesConverter,
       SparkTransformConverter sparkTransformConverter,
       SparkTypeConverter sparkTypeConverter) {
-    DorisPhysicalSchema physicalSchema;
+    Supplier<DorisPhysicalSchema> physicalSchemaLoader =
+        () -> loadPhysicalSchema(sparkCatalog, identifier, sparkTable);
+    DorisPhysicalSchemaCache.Lookup physicalSchemaLookup;
     try {
-      // This is the first and only physical schema request for one successfully authorized
-      // BaseCatalog.loadTable result. The version-specific implementation may retain the original
-      // FE type names that the Connector's Catalyst schema intentionally normalizes.
-      physicalSchema =
-          physicalSchemaCache.get(
-              identifier, () -> loadPhysicalSchema(sparkCatalog, identifier, sparkTable));
+      // The normal path makes at most one physical schema request after authorization. The
+      // version-specific implementation may retain the original FE type names that the
+      // Connector's Catalyst schema intentionally normalizes.
+      physicalSchemaLookup = physicalSchemaCache.getWithStatus(identifier, physicalSchemaLoader);
     } catch (LinkageError e) {
       throw missingConnectorDependency(e);
     } catch (RuntimeException e) {
@@ -217,9 +218,37 @@ public abstract class GovernedDorisCatalog extends GravitinoJdbcCatalog {
               qualifiedIdentifier(identifier)));
     }
 
-    DorisReadSchema readSchema =
-        DorisSchemaCompatibility.planReadSchema(
-            identifier, gravitinoTable, physicalSchema, sparkTypeConverter);
+    DorisReadSchema readSchema;
+    try {
+      readSchema =
+          DorisSchemaCompatibility.planReadSchema(
+              identifier, gravitinoTable, physicalSchemaLookup.schema(), sparkTypeConverter);
+    } catch (IllegalArgumentException incompatibleCachedSnapshot) {
+      if (!physicalSchemaLookup.cacheHit()) {
+        throw incompatibleCachedSnapshot;
+      }
+
+      // Spark resolves a REFRESH TABLE relation before it invokes invalidateTable. If that
+      // resolution observes a cached snapshot made stale by Doris DDL, conditionally replace only
+      // that exact snapshot and validate once more. A fresh mismatch still fails closed, and this
+      // path never retries physical load failures.
+      DorisPhysicalSchema refreshedPhysicalSchema;
+      try {
+        refreshedPhysicalSchema =
+            physicalSchemaCache.reloadIfSame(
+                identifier, physicalSchemaLookup.schema(), physicalSchemaLoader);
+      } catch (LinkageError e) {
+        throw missingConnectorDependency(e);
+      } catch (RuntimeException e) {
+        throw new IllegalArgumentException(
+            String.format(
+                "Failed to load physical Doris schema for authorized table %s",
+                qualifiedIdentifier(identifier)));
+      }
+      readSchema =
+          DorisSchemaCompatibility.planReadSchema(
+              identifier, gravitinoTable, refreshedPhysicalSchema, sparkTypeConverter);
+    }
     Table readDelegate;
     try {
       readDelegate =

@@ -42,9 +42,9 @@ connector adds:
 - native, parallel Doris tablet reads for lossless detail scans;
 - aggregate, Top-N, limit, and offset pushdown through Spark's own JDBC V2 planner;
 - the same JDBC partition tuple and fetch-size controls as a direct Spark JDBC read;
-- stable String semantics for DATETIME, complex, unsigned, sketch, binary, wide-decimal, and
-  future FE-reported Doris types;
-- bounded physical-schema caching with precise `REFRESH TABLE` invalidation;
+- stable String/base64 semantics for the explicitly verified DATETIME, complex, JSON, VARIANT,
+  IP, LARGEINT, sketch, and Doris 4 wide-decimal types;
+- bounded physical-schema caching with precise invalidation and one safe stale-hit revalidation;
 - a read-only capability facade that prevents write-capability leakage from the native delegate.
 
 See [Architecture](docs/architecture.md) for the execution and trust boundaries, and
@@ -164,16 +164,18 @@ catalog has no reliable default namespace.
 
 ## Type behavior
 
-Lossless scalar values retain Catalyst types. Doris DATETIME/DATETIMEV2, LARGEINT, unsigned values,
-complex values, JSON/JSONB, VARIANT, IP addresses, wide decimals, and unknown FE-reported types are
-exposed as String. BINARY and VARBINARY use base64; BITMAP and HLL use Doris base64 functions. This
-avoids rejecting an entire table because one readable Doris type has no stable Catalyst
-representation.
+Lossless scalar values retain Catalyst types. Doris DATETIME/DATETIMEV2, ARRAY, MAP, STRUCT,
+LARGEINT, JSON/JSONB, VARIANT, IP addresses, and the verified Doris 4 wide-decimal form are exposed
+as String. BITMAP and HLL use Doris base64 functions. BINARY, VARBINARY, TIME, unsigned integer DDL,
+and the explicit legacy DECIMAL family names are probe-only because both certified Doris images
+reject their test DDL; they are not part of the released read guarantee.
 
 String normalization is intentionally directional. Column count, order, case-insensitive names,
 and nullability safety still fail closed. Lossless scalar types remain validated against Gravitino
-metadata. For complex, sketch, wide-decimal, and future types whose JDBC metadata is lossy, the FE
-type is authoritative for the String/base64 execution representation.
+metadata. Only the matrix-listed complex, sketch, wide-decimal, JSON, VARIANT, and IP mappings whose
+JDBC metadata is proven lossy may use the FE type as the String/base64 execution authority. An
+unlisted or future FE type fails closed instead of being silently promoted to String support. See
+the [type contract evidence matrix](docs/testing.md#type-contract-evidence).
 
 ## Build and test
 

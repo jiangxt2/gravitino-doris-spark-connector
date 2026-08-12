@@ -116,7 +116,14 @@ loads the new values.
 
 Each returned table wrapper owns its validated snapshot. The catalog cache reduces repeated FE
 requests across wrapper instances. Authorization and logical-schema comparison still run on every
-load.
+load, including a cache hit. A cache entry contains the Catalyst fields and their corresponding FE
+type names as one immutable snapshot. A compatible hit performs no FE request. If current logical
+metadata is incompatible with a cached snapshot, the catalog conditionally replaces that exact
+entry with one coalesced fresh FE load and validates once more. This is a single stale-hit
+revalidation, not a general retry: an initial or refreshed mismatch fails closed, and load errors
+are not retried. `REFRESH TABLE` and catalog `invalidateTable` evict only the target table; TTL
+expiry reloads the complete snapshot. A zero TTL performs a fresh load every time and does not
+retain stale physical schema state.
 
 ## Allowed native read tuning
 

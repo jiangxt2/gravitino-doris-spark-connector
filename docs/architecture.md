@@ -157,20 +157,38 @@ table, and returns an executable Spark schema. It retains physical order, names,
 while merging governed comments.
 
 Directly representable scalar types remain typed. DATETIME avoids JVM and Spark-session time-zone
-conversion by using Doris text. Complex, JSONB, VARIANT, IP, and future FE types use JDBC
-`getString`; binary and sketch families use explicit base64 projections.
+conversion by using Doris text. The verified ARRAY, MAP, STRUCT, LARGEINT, JSON/JSONB, VARIANT, IP,
+and Doris 4 wide-decimal forms use JDBC `getString`; BITMAP and HLL use explicit base64
+projections. The exact two-version contract and probe-only DDL forms are recorded in
+[Testing](testing.md#type-contract-evidence).
 
 Gravitino 1.3 obtains Doris logical types through JDBC metadata, which can erase complex
-containers, report LARGEINT as INTEGER, and report sketch, VARIANT, IP, or future types as generic
-`UNKNOWN`. The FE type is authoritative only for those proven lossy mappings and generic
-placeholders. An ordinary governed scalar cannot silently drift to VARIANT or an unknown future
-type. Column count, order, case-insensitive name, and nullability remain strict. Lossless scalars
-and normalized families whose JDBC identity is stable (DATETIME, BINARY, and unsigned integers)
+containers, report LARGEINT as INTEGER, and report sketch, VARIANT, or IP types through lossy or
+generic metadata. The FE type is authoritative only for the matrix-listed lossy mappings. Generic
+`UNKNOWN`/`OTHER` cannot authorize an arbitrary type: it is accepted only when the FE type belongs
+to a matrix-listed lossy family such as ARRAY/MAP/STRUCT, LARGEINT, sketch, JSON/JSONB, VARIANT, or
+IP. An unlisted future FE type fails closed. Column count, order, case-insensitive name, and
+nullability remain strict. Lossless scalars and normalized families whose JDBC identity is stable
 retain directional type checks. The adapter does not rely on a private or synthetic table marker
 property.
 
-The per-catalog physical-schema cache is bounded by size and TTL. Authorization always runs before
-cache lookup. `invalidateTable`, including Spark `REFRESH TABLE`, invalidates the precise table key.
+The compatibility overload without FE type names is a conservative legacy path, not a production
+type-identity source. It permits lossless scalars plus timestamp and binary normalization that can
+be proven from the logical and Catalyst types alone. External, generic, unsigned, complex, sketch,
+and future types fail closed on that path and cannot be promoted into the two-version support
+matrix.
+
+The per-catalog physical-schema cache is bounded by size and TTL. One successful authorized table
+load uses one immutable pair of Catalyst fields and FE type names for compatibility validation,
+execution schema, and projection planning; this is not a cross-system transactional snapshot.
+Authorization and current logical-schema comparison run on every load, including cache hits.
+A compatible cache hit does not access FE again. If a cached snapshot fails compatibility because
+Doris DDL changed, the adapter conditionally removes only that exact snapshot, coalesces one fresh
+FE load, and validates once more. This bounded revalidation lets Spark resolve `REFRESH TABLE`,
+whose analysis loads the relation before calling catalog invalidation. A mismatch from a cache
+miss or from the one fresh replacement still fails closed; physical load failures are never
+retried. `invalidateTable` invalidates only the precise table key, expiry reloads the complete pair,
+and a zero TTL retains no cached snapshot.
 
 ## Credential and trust boundary
 

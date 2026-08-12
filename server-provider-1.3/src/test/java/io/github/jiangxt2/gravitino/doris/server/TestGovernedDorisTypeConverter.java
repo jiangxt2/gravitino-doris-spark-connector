@@ -29,7 +29,7 @@ public class TestGovernedDorisTypeConverter {
   private final GovernedDorisTypeConverter converter = new GovernedDorisTypeConverter();
 
   @Test
-  void mapsCommonDorisTypesAndPreservesParameterizedTypes() {
+  void testMapsEvidenceBackedReadTypeFamilies() {
     assertThat(convert("BOOLEAN")).isEqualTo(Types.BooleanType.get());
     assertThat(convert("TINYINT")).isEqualTo(Types.ByteType.get());
     assertThat(convert("SMALLINT")).isEqualTo(Types.ShortType.get());
@@ -45,6 +45,15 @@ public class TestGovernedDorisTypeConverter {
     assertThat(convert("BINARY")).isEqualTo(Types.BinaryType.get());
     assertThat(convert("VARBINARY")).isEqualTo(Types.BinaryType.get());
     assertThat(convert("TIME")).isEqualTo(Types.ExternalType.of("time"));
+    assertThat(convert("JSON")).isEqualTo(Types.ExternalType.of("json"));
+    assertThat(convert("JSONB")).isEqualTo(Types.ExternalType.of("jsonb"));
+    assertThat(convert("VARIANT")).isEqualTo(Types.ExternalType.of("variant"));
+    assertThat(convert("IPV4")).isEqualTo(Types.ExternalType.of("ipv4"));
+    assertThat(convert("IPV6")).isEqualTo(Types.ExternalType.of("ipv6"));
+    assertThat(convert("LARGEINT")).isEqualTo(Types.ExternalType.of("largeint"));
+    assertThat(convert("BITMAP")).isEqualTo(Types.ExternalType.of("bitmap"));
+    assertThat(convert("HLL")).isEqualTo(Types.ExternalType.of("hll"));
+    assertThat(convert("BIGINT UNSIGNED")).isEqualTo(Types.ExternalType.of("bigint unsigned"));
   }
 
   @Test

@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import java.util.Arrays;
 import java.util.Collections;
@@ -173,7 +174,7 @@ public class TestDorisHybridScanBuilder35 {
   }
 
   @Test
-  void testNormalizedColumnOperatorsRemainInSpark() {
+  void testKeepsNormalizedOperatorsAsSparkResiduals() {
     RecordingNativeBuilder nativeBuilder = new RecordingNativeBuilder();
     RecordingSqlBuilder sqlBuilder = new RecordingSqlBuilder();
     DorisHybridScanBuilder35 builder =
@@ -191,6 +192,17 @@ public class TestDorisHybridScanBuilder35 {
         new Aggregation(new AggregateFunc[0], new Expression[] {Expressions.column("event_time")});
     assertFalse(builder.supportCompletePushDown(aggregation));
     assertFalse(builder.pushAggregation(aggregation));
+
+    AggregateFunc aggregateInput = mock(AggregateFunc.class);
+    when(aggregateInput.references())
+        .thenReturn(
+            new org.apache.spark.sql.connector.expressions.NamedReference[] {
+              Expressions.column("event_time")
+            });
+    Aggregation aggregateOnNormalized =
+        new Aggregation(new AggregateFunc[] {aggregateInput}, new Expression[0]);
+    assertFalse(builder.supportCompletePushDown(aggregateOnNormalized));
+    assertFalse(builder.pushAggregation(aggregateOnNormalized));
     assertFalse(
         builder.pushTopN(
             new SortOrder[] {

@@ -16,6 +16,7 @@ package io.github.jiangxt2.gravitino.doris.it;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.testcontainers.shaded.org.awaitility.Awaitility.await;
 
 import com.google.common.collect.ImmutableList;
@@ -29,6 +30,7 @@ import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -38,6 +40,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.stream.Collectors;
 import org.apache.gravitino.Catalog;
@@ -50,6 +53,8 @@ import org.apache.gravitino.client.GravitinoClient;
 import org.apache.gravitino.client.GravitinoMetalake;
 import org.apache.gravitino.exceptions.ForbiddenException;
 import org.apache.gravitino.rel.TableCatalog;
+import org.apache.gravitino.rel.types.Type;
+import org.apache.gravitino.rel.types.Types;
 import org.apache.logging.log4j.LogManager;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
@@ -58,12 +63,14 @@ import org.apache.spark.sql.connector.catalog.CatalogManager;
 import org.apache.spark.sql.connector.catalog.Identifier;
 import org.apache.spark.sql.connector.catalog.Table;
 import org.apache.spark.sql.connector.catalog.TableCapability;
+import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.function.Executable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -88,11 +95,47 @@ public class GovernedDorisConnectorIT {
   private static final String PARTITIONED_TABLE = "partitioned_types";
   private static final String CACHE_TABLE = "cache_table";
   private static final String FAILURE_TABLE = "failure_table";
+  private static final String DRIFT_TABLE = "drift_table";
   private static final String DENIED_TABLE = "denied_table";
   private static final String WIDE_DECIMAL_TABLE = "wide_decimal";
   private static final String READER = "doris_it_reader";
   private static final String READER_ROLE = "doris_it_reader_role";
   private static final String NULL_VALUE = "<null>";
+  private static final List<TypeContractProbe> TYPE_CONTRACT_PROBES =
+      Arrays.asList(
+          TypeContractProbe.supported(
+              "integer", "INTEGER", "17", "INT", Types.IntegerType.get(), DataTypes.IntegerType),
+          TypeContractProbe.ddlRejected("decimalv2", "DECIMALV2(18,3)", "123.456"),
+          TypeContractProbe.ddlRejected("decimal32", "DECIMAL32(9,2)", "123.45"),
+          TypeContractProbe.ddlRejected("decimal64", "DECIMAL64(18,3)", "123.456"),
+          TypeContractProbe.ddlRejected("decimal128", "DECIMAL128(38,6)", "123.456789"),
+          TypeContractProbe.supported(
+              "datev2", "DATEV2", "'2026-01-02'", "DATE", Types.DateType.get(), DataTypes.DateType),
+          TypeContractProbe.supported(
+              "text", "TEXT", "'evidence'", "TEXT", Types.StringType.get(), DataTypes.StringType),
+          TypeContractProbe.normalized(
+              "jsonb",
+              "JSONB",
+              "'{\"k\":1}'",
+              "JSON",
+              Types.ExternalType.of("json"),
+              DataTypes.StringType),
+          TypeContractProbe.versionedNormalized(
+              "wide_decimal",
+              "DECIMAL(76,6)",
+              "1234567890123456789012345678901234567890.123456",
+              false,
+              true,
+              "DECIMAL(76,6)",
+              Types.ExternalType.of("decimal(76,6)"),
+              DataTypes.StringType),
+          TypeContractProbe.ddlRejected("binary", "BINARY", "X'4142'"),
+          TypeContractProbe.ddlRejected("varbinary", "VARBINARY", "X'4142'"),
+          TypeContractProbe.ddlRejected("time", "TIME", "'12:34:56'"),
+          TypeContractProbe.ddlRejected("tinyint_unsigned", "TINYINT UNSIGNED", "1"),
+          TypeContractProbe.ddlRejected("smallint_unsigned", "SMALLINT UNSIGNED", "1"),
+          TypeContractProbe.ddlRejected("int_unsigned", "INT UNSIGNED", "1"),
+          TypeContractProbe.ddlRejected("bigint_unsigned", "BIGINT UNSIGNED", "1"));
 
   private DockerTestNetwork network;
   private DorisTestCluster doris;
@@ -103,6 +146,7 @@ public class GovernedDorisConnectorIT {
   private GravitinoMetalake metalake;
   private GravitinoClient governedClient;
   private SparkSession spark;
+  private final Map<String, TypeContractProbeResult> typeContractResults = new LinkedHashMap<>();
 
   @BeforeAll
   void startInfrastructure() throws Exception {
@@ -167,7 +211,7 @@ public class GovernedDorisConnectorIT {
   }
 
   @Test
-  void readsCommonTypesThroughNativeLaneWithVendedCredentials() throws Exception {
+  void recordsTypeContractForCurrentDorisVersion() throws Exception {
     Catalog catalog = governedClient.loadCatalog(CATALOG);
     assertThat(catalog.properties()).doesNotContainKeys("jdbc-user", "jdbc-password");
 
@@ -214,6 +258,13 @@ public class GovernedDorisConnectorIT {
     assertThat(sparkRows(pushed)).containsExactly("2,beta", "3,alphabet");
     String plan = pushed.queryExecution().executedPlan().toString();
     assertThat(plan).contains("DorisScanV2").doesNotContain("JDBCRelation");
+
+    logTypeContractEvidence();
+    assertAll(
+        "Doris " + doris.version() + " type contract",
+        TYPE_CONTRACT_PROBES.stream()
+            .map(probe -> (Executable) () -> assertTypeContractProbe(probe))
+            .collect(Collectors.toList()));
   }
 
   @Test
@@ -272,7 +323,7 @@ public class GovernedDorisConnectorIT {
   }
 
   @Test
-  void preservesDatetimeAndComplexValuesAsStrings() throws Exception {
+  void keepsNormalizedColumnOperatorsAsSparkResiduals() throws Exception {
     Dataset<Row> normalized = spark.table(qualified(CATALOG, NORMALIZED_TABLE));
     assertThat(normalized.schema().apply("id").dataType()).isEqualTo(DataTypes.IntegerType);
     Arrays.stream(normalized.schema().fields())
@@ -301,12 +352,12 @@ public class GovernedDorisConnectorIT {
     assertThat(extended.schema().apply("variant_col").dataType()).isEqualTo(DataTypes.StringType);
     assertThat(extended.schema().apply("ipv4_col").dataType()).isEqualTo(DataTypes.StringType);
     assertThat(extended.schema().apply("ipv6_col").dataType()).isEqualTo(DataTypes.StringType);
-    assertThat(
-            sparkRows(
-                spark.sql(
-                    "SELECT id, variant_col, ipv4_col, ipv6_col FROM "
-                        + qualified(CATALOG, EXTENDED_TABLE)
-                        + " ORDER BY id")))
+    Dataset<Row> extendedFrame =
+        spark.sql(
+            "SELECT id, variant_col, ipv4_col, ipv6_col FROM "
+                + qualified(CATALOG, EXTENDED_TABLE)
+                + " ORDER BY id");
+    assertThat(sparkRows(extendedFrame))
         .containsExactlyElementsOf(
             jdbcRows(
                 "SELECT id, variant_col, ipv4_col, ipv6_col FROM `"
@@ -314,6 +365,9 @@ public class GovernedDorisConnectorIT {
                     + "`.`"
                     + EXTENDED_TABLE
                     + "` ORDER BY id"));
+    assertThat(extendedFrame.queryExecution().executedPlan().toString())
+        .contains("JDBCScan")
+        .doesNotContain("DorisScanV2");
 
     Dataset<Row> ordered =
         spark.sql(
@@ -321,6 +375,45 @@ public class GovernedDorisConnectorIT {
                 + qualified(CATALOG, NORMALIZED_TABLE)
                 + " ORDER BY event_time");
     assertThat(ordered.queryExecution().executedPlan().toString()).contains("Sort");
+
+    String residualWhere =
+        "SELECT id FROM "
+            + qualified(CATALOG, NORMALIZED_TABLE)
+            + " WHERE event_time >= '2026-04-05 06:07:08.123456' OR event_time IS NULL "
+            + "ORDER BY id";
+    Dataset<Row> filtered = spark.sql(residualWhere);
+    assertThat(sparkRows(filtered)).containsExactly("1", "2");
+    assertThat(filtered.queryExecution().executedPlan().toString())
+        .contains("Filter")
+        .contains("JDBCScan")
+        .contains("PushedFilters: []");
+
+    Dataset<Row> grouped =
+        spark.sql(
+            "SELECT event_time, COUNT(*) FROM "
+                + qualified(CATALOG, NORMALIZED_TABLE)
+                + " GROUP BY event_time");
+    assertThat(sorted(sparkRows(grouped)))
+        .isEqualTo(
+            sorted(
+                jdbcRows(
+                    "SELECT event_time, COUNT(*) FROM `"
+                        + SCHEMA
+                        + "`.`"
+                        + NORMALIZED_TABLE
+                        + "` GROUP BY event_time")));
+    assertThat(grouped.queryExecution().executedPlan().toString())
+        .contains("Aggregate")
+        .doesNotContain("PushedAggregates: [COUNT");
+
+    Dataset<Row> aggregated =
+        spark.sql("SELECT MAX(event_time) FROM " + qualified(CATALOG, NORMALIZED_TABLE));
+    assertThat(sparkRows(aggregated))
+        .isEqualTo(
+            jdbcRows("SELECT MAX(event_time) FROM `" + SCHEMA + "`.`" + NORMALIZED_TABLE + "`"));
+    assertThat(aggregated.queryExecution().executedPlan().toString())
+        .contains("Aggregate")
+        .doesNotContain("PushedAggregates: [MAX");
 
     Dataset<Row> sketch = spark.table(qualified(CATALOG, SKETCH_TABLE));
     assertThat(sketch.schema().apply("bitmap_col").dataType()).isEqualTo(DataTypes.StringType);
@@ -449,7 +542,7 @@ public class GovernedDorisConnectorIT {
   }
 
   @Test
-  void partitionedSqlLaneMatchesDirectSparkJdbc() throws Exception {
+  void matchesDirectJdbcSchemaPartitionsAndPushdown() throws Exception {
     Dataset<Row> governed =
         spark.table(qualified(PARTITIONED_CATALOG, PARTITIONED_TABLE)).select("id", "event_time");
     Dataset<Row> direct = directPartitionedFrame();
@@ -465,6 +558,9 @@ public class GovernedDorisConnectorIT {
             sorted(
                 jdbcRows(
                     "SELECT id, event_time FROM `" + SCHEMA + "`.`" + PARTITIONED_TABLE + "`")));
+    assertThat(governed.queryExecution().executedPlan().toString())
+        .contains("JDBCScan")
+        .doesNotContain("DorisScanV2");
   }
 
   @Test
@@ -672,7 +768,7 @@ public class GovernedDorisConnectorIT {
 
   @Test
   @SuppressWarnings("deprecation")
-  void cachesOnePhysicalSchemaSnapshotAndRefreshesPrecisely() throws Exception {
+  void usesOnePhysicalSchemaSnapshotPerAuthorizedLoad() throws Exception {
     org.apache.spark.sql.connector.catalog.TableCatalog sparkCatalog = sparkCatalog(CATALOG);
     Identifier identifier = Identifier.of(new String[] {SCHEMA}, CACHE_TABLE);
     String path = schemaPath(CACHE_TABLE);
@@ -680,7 +776,7 @@ public class GovernedDorisConnectorIT {
     feProxy.reset();
 
     Table first = sparkCatalog.loadTable(identifier);
-    first.schema();
+    assertThat(first.schema().fieldNames()).containsExactly("id");
     sparkCatalog.loadTable(identifier).schema();
     assertThat(feProxy.requestCount("GET", path)).isEqualTo(1);
 
@@ -698,6 +794,51 @@ public class GovernedDorisConnectorIT {
         .hasMessageNotContaining("credential-bearing")
         .hasMessageNotContaining(DorisTestCluster.TEST_PASSWORD);
     assertThat(feProxy.requestCount("GET", failurePath)).isEqualTo(1);
+  }
+
+  @Test
+  @SuppressWarnings("deprecation")
+  void reloadsStaleSnapshotAndCompletesRefreshTable() throws Throwable {
+    org.apache.spark.sql.connector.catalog.TableCatalog sparkCatalog = sparkCatalog(CATALOG);
+    Identifier identifier = Identifier.of(new String[] {SCHEMA}, DRIFT_TABLE);
+    String qualifiedTable = "`" + SCHEMA + "`.`" + DRIFT_TABLE + "`";
+    String path = schemaPath(DRIFT_TABLE);
+    sparkCatalog.invalidateTable(identifier);
+    feProxy.reset();
+    assertThat(sparkCatalog.loadTable(identifier).schema().fieldNames()).containsExactly("id");
+    assertThat(feProxy.requestCount("GET", path)).isEqualTo(1);
+
+    Throwable testFailure = null;
+    try (Connection connection =
+            DriverManager.getConnection(
+                doris.hostJdbcUrl(), DorisTestCluster.TEST_USER, DorisTestCluster.TEST_PASSWORD);
+        Statement statement = connection.createStatement()) {
+      statement.execute("ALTER TABLE " + qualifiedTable + " ADD COLUMN drifted BIGINT NULL");
+      await()
+          .atMost(Duration.ofSeconds(30))
+          .untilAsserted(() -> assertThat(jdbcColumnTypes(DRIFT_TABLE)).containsKey("drifted"));
+
+      // Spark resolves the relation before invoking catalog invalidation. The cached mismatch
+      // therefore performs one conditional FE reload, after which REFRESH TABLE can complete.
+      spark.sql("REFRESH TABLE " + qualified(CATALOG, DRIFT_TABLE)).collectAsList();
+      assertThat(feProxy.requestCount("GET", path)).isEqualTo(2);
+      assertThat(sparkCatalog.loadTable(identifier).schema().fieldNames())
+          .containsExactly("id", "drifted");
+      assertThat(feProxy.requestCount("GET", path)).isEqualTo(3);
+    } catch (Throwable failure) {
+      testFailure = failure;
+      throw failure;
+    } finally {
+      try {
+        restoreDriftTable(sparkCatalog, identifier, qualifiedTable);
+      } catch (Throwable cleanupFailure) {
+        if (testFailure != null) {
+          testFailure.addSuppressed(cleanupFailure);
+        } else {
+          throw cleanupFailure;
+        }
+      }
+    }
   }
 
   @Test
@@ -870,10 +1011,19 @@ public class GovernedDorisConnectorIT {
 
       createSimpleTable(statement, CACHE_TABLE);
       createSimpleTable(statement, FAILURE_TABLE);
+      createSimpleTable(statement, DRIFT_TABLE);
       createSimpleTable(statement, DENIED_TABLE);
       statement.executeUpdate("INSERT INTO `" + SCHEMA + "`.`" + CACHE_TABLE + "` VALUES (1)");
       statement.executeUpdate("INSERT INTO `" + SCHEMA + "`.`" + FAILURE_TABLE + "` VALUES (1)");
+      statement.executeUpdate("INSERT INTO `" + SCHEMA + "`.`" + DRIFT_TABLE + "` VALUES (1)");
       statement.executeUpdate("INSERT INTO `" + SCHEMA + "`.`" + DENIED_TABLE + "` VALUES (1)");
+
+      if (doris.version().startsWith("4.")) {
+        statement.execute("SET enable_decimal256 = true");
+      }
+      for (TypeContractProbe probe : TYPE_CONTRACT_PROBES) {
+        createTypeContractProbe(statement, probe);
+      }
 
       statement.execute(
           "CREATE TABLE `"
@@ -885,7 +1035,6 @@ public class GovernedDorisConnectorIT {
       insertPartitionedRows(statement);
 
       if (doris.version().startsWith("4.")) {
-        statement.execute("SET enable_decimal256 = true");
         statement.execute(
             "CREATE TABLE `"
                 + SCHEMA
@@ -963,12 +1112,26 @@ public class GovernedDorisConnectorIT {
                 SKETCH_TABLE,
                 CACHE_TABLE,
                 FAILURE_TABLE,
+                DRIFT_TABLE,
                 DENIED_TABLE));
     if (doris.version().startsWith("4.")) {
       mainTables.add(WIDE_DECIMAL_TABLE);
     }
     TableCatalog mainTableCatalog = catalog.asTableCatalog();
     mainTables.forEach(name -> mainTableCatalog.loadTable(NameIdentifier.of(SCHEMA, name)));
+    for (TypeContractProbeResult result : typeContractResults.values()) {
+      if (!result.ddlSucceeded) {
+        continue;
+      }
+      mainTables.add(result.probe.tableName());
+      try {
+        org.apache.gravitino.rel.Table table =
+            mainTableCatalog.loadTable(NameIdentifier.of(SCHEMA, result.probe.tableName()));
+        result.logicalType = table.columns()[1].dataType();
+      } catch (RuntimeException e) {
+        result.providerFailure = e.getClass().getSimpleName();
+      }
+    }
     partitionedCatalog.asTableCatalog().loadTable(NameIdentifier.of(SCHEMA, PARTITIONED_TABLE));
     recorderControlCatalog.asTableCatalog().loadTable(NameIdentifier.of(SCHEMA, COMMON_TABLE));
 
@@ -1146,6 +1309,146 @@ public class GovernedDorisConnectorIT {
         .forEach(grants::add);
   }
 
+  private void assertTypeContractProbe(TypeContractProbe probe) throws Exception {
+    TypeContractProbeResult result = typeContractResults.get(probe.name);
+    assertThat(result).as("missing type probe result for %s", probe.ddlType).isNotNull();
+    boolean expectedDdlSupport = probe.supports(doris.version());
+    assertThat(result.ddlSucceeded)
+        .as(
+            "%s DDL support on Doris %s; failure=%s",
+            probe.ddlType, doris.version(), result.ddlFailure)
+        .isEqualTo(expectedDdlSupport);
+
+    if (!expectedDdlSupport) {
+      assertThat(result.insertSucceeded).isFalse();
+      assertThat(result.logicalType).isNull();
+      assertThat(result.ddlFailure).isEqualTo(probe.expectedDdlFailure);
+      return;
+    }
+
+    assertThat(result.insertSucceeded)
+        .as(
+            "%s insert support on Doris %s; failure=%s",
+            probe.ddlType, doris.version(), result.insertFailure)
+        .isTrue();
+    assertThat(result.feTypeName).isEqualToIgnoringCase(probe.expectedFeTypeName);
+    assertThat(result.providerFailure).isNull();
+    assertThat(result.logicalType)
+        .as("%s logical type from FE type %s", probe.ddlType, result.feTypeName)
+        .isEqualTo(probe.expectedLogicalType);
+
+    Dataset<Row> frame =
+        spark
+            .table(qualified(CATALOG, probe.tableName()))
+            .select("id", "probe_value")
+            .orderBy("id");
+    assertThat(frame.schema().apply("probe_value").dataType()).isEqualTo(probe.expectedSparkType);
+    assertThat(sparkRows(frame))
+        .containsExactlyElementsOf(
+            jdbcRows(
+                "SELECT id, probe_value FROM `"
+                    + SCHEMA
+                    + "`.`"
+                    + probe.tableName()
+                    + "` ORDER BY id"));
+    assertThat(frame.rdd().getNumPartitions()).isEqualTo(1);
+    String plan = frame.queryExecution().executedPlan().toString();
+    if (probe.requiresSqlExecution) {
+      assertThat(plan).contains("JDBCScan").doesNotContain("DorisScanV2");
+    } else {
+      assertThat(plan).contains("DorisScanV2").doesNotContain("JDBCRelation");
+    }
+  }
+
+  private Map<String, String> jdbcColumnTypes(String table) throws Exception {
+    try (Connection connection =
+            DriverManager.getConnection(
+                doris.hostJdbcUrl(), DorisTestCluster.TEST_USER, DorisTestCluster.TEST_PASSWORD);
+        Statement statement = connection.createStatement()) {
+      return jdbcColumnTypes(statement, table);
+    }
+  }
+
+  private void restoreDriftTable(
+      org.apache.spark.sql.connector.catalog.TableCatalog sparkCatalog,
+      Identifier identifier,
+      String qualifiedTable)
+      throws Exception {
+    try {
+      if (jdbcColumnTypes(DRIFT_TABLE).containsKey("drifted")) {
+        try (Connection connection =
+                DriverManager.getConnection(
+                    doris.hostJdbcUrl(),
+                    DorisTestCluster.TEST_USER,
+                    DorisTestCluster.TEST_PASSWORD);
+            Statement statement = connection.createStatement()) {
+          statement.execute("ALTER TABLE " + qualifiedTable + " DROP COLUMN drifted");
+        }
+      }
+      await()
+          .atMost(Duration.ofSeconds(30))
+          .untilAsserted(
+              () -> assertThat(jdbcColumnTypes(DRIFT_TABLE)).doesNotContainKey("drifted"));
+    } finally {
+      sparkCatalog.invalidateTable(identifier);
+    }
+  }
+
+  private void logTypeContractEvidence() throws Exception {
+    List<String> probes =
+        typeContractResults.values().stream()
+            .map(
+                result ->
+                    String.format(
+                        Locale.ROOT,
+                        "%s{ddl=%s,insert=%s,desc=%s,logical=%s,ddlFailure=%s,insertFailure=%s}",
+                        result.probe.ddlType,
+                        result.ddlSucceeded,
+                        result.insertSucceeded,
+                        result.feTypeName,
+                        result.logicalType == null ? null : result.logicalType.simpleString(),
+                        result.ddlFailure,
+                        result.insertFailure))
+            .collect(Collectors.toList());
+    LOG.info(
+        "Doris {} type contract evidence: commonDesc={}, commonLogical={}, normalizedDesc={}, "
+            + "normalizedLogical={}, extendedDesc={}, extendedLogical={}, sketchDesc={}, "
+            + "sketchLogical={}, probes={}",
+        doris.version(),
+        jdbcColumnTypes(COMMON_TABLE),
+        governedColumnTypes(COMMON_TABLE),
+        jdbcColumnTypes(NORMALIZED_TABLE),
+        governedColumnTypes(NORMALIZED_TABLE),
+        jdbcColumnTypes(EXTENDED_TABLE),
+        governedColumnTypes(EXTENDED_TABLE),
+        jdbcColumnTypes(SKETCH_TABLE),
+        governedColumnTypes(SKETCH_TABLE),
+        probes);
+  }
+
+  private Map<String, String> governedColumnTypes(String table) {
+    org.apache.gravitino.rel.Table governedTable =
+        governedClient
+            .loadCatalog(CATALOG)
+            .asTableCatalog()
+            .loadTable(NameIdentifier.of(SCHEMA, table));
+    Map<String, String> logicalTypes = new LinkedHashMap<>();
+    Arrays.stream(governedTable.columns())
+        .forEach(column -> logicalTypes.put(column.name(), column.dataType().simpleString()));
+    return logicalTypes;
+  }
+
+  private static Map<String, String> jdbcColumnTypes(Statement statement, String table)
+      throws Exception {
+    Map<String, String> columnTypes = new LinkedHashMap<>();
+    try (ResultSet columns = statement.executeQuery("DESC `" + SCHEMA + "`.`" + table + "`")) {
+      while (columns.next()) {
+        columnTypes.put(columns.getString(1).toLowerCase(Locale.ROOT), columns.getString(2));
+      }
+    }
+    return columnTypes;
+  }
+
   private List<String> jdbcRows(String sql) throws Exception {
     List<String> rows = new ArrayList<>();
     try (Connection connection =
@@ -1258,6 +1561,47 @@ public class GovernedDorisConnectorIT {
             + "PROPERTIES ('replication_num'='1')");
   }
 
+  private void createTypeContractProbe(Statement statement, TypeContractProbe probe) {
+    TypeContractProbeResult result = new TypeContractProbeResult(probe);
+    typeContractResults.put(probe.name, result);
+    try {
+      statement.execute(
+          "CREATE TABLE `"
+              + SCHEMA
+              + "`.`"
+              + probe.tableName()
+              + "` (id INT NOT NULL, probe_value "
+              + probe.ddlType
+              + ") DUPLICATE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1 "
+              + "PROPERTIES ('replication_num'='1')");
+      result.ddlSucceeded = true;
+      result.feTypeName = jdbcColumnTypes(statement, probe.tableName()).get("probe_value");
+    } catch (SQLException e) {
+      result.ddlFailure = sqlFailureCategory(e);
+      return;
+    } catch (Exception e) {
+      throw new IllegalStateException("Unable to inspect type probe " + probe.ddlType, e);
+    }
+
+    try {
+      statement.executeUpdate(
+          "INSERT INTO `"
+              + SCHEMA
+              + "`.`"
+              + probe.tableName()
+              + "` VALUES (1, "
+              + probe.insertLiteral
+              + "), (2, NULL)");
+      result.insertSucceeded = true;
+    } catch (SQLException e) {
+      result.insertFailure = sqlFailureCategory(e);
+    }
+  }
+
+  private static String sqlFailureCategory(SQLException exception) {
+    return "SQLState=" + exception.getSQLState() + ", errorCode=" + exception.getErrorCode();
+  }
+
   private static void insertPartitionedRows(Statement statement) throws Exception {
     for (int batch = 0; batch < 20; batch++) {
       StringBuilder sql =
@@ -1297,6 +1641,142 @@ public class GovernedDorisConnectorIT {
       closeable.close();
     } catch (Exception e) {
       LOG.warn("Failed to close integration-test resource {}", closeable.getClass().getName(), e);
+    }
+  }
+
+  private static final class TypeContractProbe {
+    private final String name;
+    private final String ddlType;
+    private final String insertLiteral;
+    private final boolean supportedOnDoris3;
+    private final boolean supportedOnDoris4;
+    private final String expectedFeTypeName;
+    private final Type expectedLogicalType;
+    private final DataType expectedSparkType;
+    private final boolean requiresSqlExecution;
+    private final String expectedDdlFailure;
+
+    private TypeContractProbe(
+        String name,
+        String ddlType,
+        String insertLiteral,
+        boolean supportedOnDoris3,
+        boolean supportedOnDoris4,
+        String expectedFeTypeName,
+        Type expectedLogicalType,
+        DataType expectedSparkType,
+        boolean requiresSqlExecution,
+        String expectedDdlFailure) {
+      this.name = name;
+      this.ddlType = ddlType;
+      this.insertLiteral = insertLiteral;
+      this.supportedOnDoris3 = supportedOnDoris3;
+      this.supportedOnDoris4 = supportedOnDoris4;
+      this.expectedFeTypeName = expectedFeTypeName;
+      this.expectedLogicalType = expectedLogicalType;
+      this.expectedSparkType = expectedSparkType;
+      this.requiresSqlExecution = requiresSqlExecution;
+      this.expectedDdlFailure = expectedDdlFailure;
+    }
+
+    private static TypeContractProbe supported(
+        String name,
+        String ddlType,
+        String insertLiteral,
+        String expectedFeTypeName,
+        Type expectedLogicalType,
+        DataType expectedSparkType) {
+      return new TypeContractProbe(
+          name,
+          ddlType,
+          insertLiteral,
+          true,
+          true,
+          expectedFeTypeName,
+          expectedLogicalType,
+          expectedSparkType,
+          false,
+          null);
+    }
+
+    private static TypeContractProbe normalized(
+        String name,
+        String ddlType,
+        String insertLiteral,
+        String expectedFeTypeName,
+        Type expectedLogicalType,
+        DataType expectedSparkType) {
+      return new TypeContractProbe(
+          name,
+          ddlType,
+          insertLiteral,
+          true,
+          true,
+          expectedFeTypeName,
+          expectedLogicalType,
+          expectedSparkType,
+          true,
+          null);
+    }
+
+    private static TypeContractProbe versionedNormalized(
+        String name,
+        String ddlType,
+        String insertLiteral,
+        boolean supportedOnDoris3,
+        boolean supportedOnDoris4,
+        String expectedFeTypeName,
+        Type expectedLogicalType,
+        DataType expectedSparkType) {
+      return new TypeContractProbe(
+          name,
+          ddlType,
+          insertLiteral,
+          supportedOnDoris3,
+          supportedOnDoris4,
+          expectedFeTypeName,
+          expectedLogicalType,
+          expectedSparkType,
+          true,
+          "SQLState=42000, errorCode=1235");
+    }
+
+    private static TypeContractProbe ddlRejected(
+        String name, String ddlType, String insertLiteral) {
+      return new TypeContractProbe(
+          name,
+          ddlType,
+          insertLiteral,
+          false,
+          false,
+          null,
+          null,
+          null,
+          false,
+          "SQLState=HY000, errorCode=1105");
+    }
+
+    private boolean supports(String version) {
+      return version.startsWith("4.") ? supportedOnDoris4 : supportedOnDoris3;
+    }
+
+    private String tableName() {
+      return "type_probe_" + name;
+    }
+  }
+
+  private static final class TypeContractProbeResult {
+    private final TypeContractProbe probe;
+    private boolean ddlSucceeded;
+    private boolean insertSucceeded;
+    private String feTypeName;
+    private String ddlFailure;
+    private String insertFailure;
+    private Type logicalType;
+    private String providerFailure;
+
+    private TypeContractProbeResult(TypeContractProbe probe) {
+      this.probe = probe;
     }
   }
 }

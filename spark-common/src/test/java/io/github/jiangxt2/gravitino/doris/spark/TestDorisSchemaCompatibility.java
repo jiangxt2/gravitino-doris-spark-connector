@@ -217,6 +217,10 @@ public class TestDorisSchemaCompatibility {
 
     assertTrue(failure.getMessage().contains("precision or scale differs"));
     assertTrue(failure.getMessage().contains("analytics.events"));
+
+    assertIncompatible(
+        new Column[] {column("legacy", Types.ExternalType.of("DECIMAL(foo)"), null, true)},
+        schema(field("legacy", DataTypes.createDecimalType(18, 3), true)));
   }
 
   @Test
@@ -227,7 +231,8 @@ public class TestDorisSchemaCompatibility {
             table(
                 new Column[] {column("wide", Types.ExternalType.of("DECIMAL(76,6)"), null, true)}),
             new DorisPhysicalSchema(
-                schema(field("wide", DataTypes.StringType, true)), Arrays.asList("DECIMAL256")),
+                schema(field("wide", DataTypes.StringType, true)),
+                Arrays.asList("DECIMAL256(76,6)")),
             TYPE_CONVERTER);
 
     assertTrue(result.requiresSqlExecution());
@@ -246,7 +251,8 @@ public class TestDorisSchemaCompatibility {
                   column("wide", Types.ExternalType.of("DECIMALV2(76,6)"), null, true)
                 }),
             new DorisPhysicalSchema(
-                schema(field("wide", DataTypes.StringType, true)), Arrays.asList("DECIMALV2")),
+                schema(field("wide", DataTypes.StringType, true)),
+                Arrays.asList("DECIMALV2(76,6)")),
             TYPE_CONVERTER);
 
     assertTrue(result.requiresSqlExecution());
@@ -266,6 +272,11 @@ public class TestDorisSchemaCompatibility {
         new Column[] {logical},
         new DorisPhysicalSchema(
             schema(field("wide", DataTypes.StringType, true)), Arrays.asList("DECIMAL256(75,12)")));
+    assertIncompatible(
+        new Column[] {logical},
+        new DorisPhysicalSchema(
+            schema(field("wide", DataTypes.StringType, true)),
+            Arrays.asList("DECIMAL256(76,12,1)")));
   }
 
   @Test
@@ -273,11 +284,11 @@ public class TestDorisSchemaCompatibility {
     Column[] logicalColumns =
         new Column[] {
           column("array_col", Types.IntegerType.get(), null, true),
-          column("map_col", Types.StringType.get(), null, true),
-          column("struct_col", Types.StringType.get(), null, true),
+          column("map_col", Types.IntegerType.get(), null, true),
+          column("struct_col", Types.IntegerType.get(), null, true),
           column("large_col", Types.IntegerType.get(), null, true),
           column("bitmap_col", Types.ExternalType.of("BIT"), null, true),
-          column("hll_col", Types.StringType.get(), null, true)
+          column("hll_col", Types.ExternalType.of("UNKNOWN"), null, true)
         };
     StructType physicalSchema =
         schema(
@@ -319,7 +330,7 @@ public class TestDorisSchemaCompatibility {
     Column[] supported =
         new Column[] {
           column("id", Types.IntegerType.get(), null, true),
-          column("event_time", Types.TimestampType.withoutTimeZone(6), null, true),
+          column("event_time", Types.TimestampType.withoutTimeZone(), null, true),
           column("payload", Types.BinaryType.get(), null, true)
         };
     DorisReadSchema result =
@@ -348,6 +359,73 @@ public class TestDorisSchemaCompatibility {
     assertIncompatible(
         new Column[] {column("value", Types.IntegerType.unsigned(), null, true)},
         schema(field("value", DataTypes.LongType, true)));
+    assertIncompatible(
+        new Column[] {column("value", Types.TimestampType.withoutTimeZone(6), null, true)},
+        schema(field("value", DataTypes.TimestampType, true)));
+  }
+
+  @Test
+  void testRejectsUnprovenJdbcLossyPlaceholders() {
+    assertIncompatible(
+        new Column[] {column("value", Types.DateType.get(), null, true)},
+        normalizedStringSchema("ARRAY"));
+    assertIncompatible(
+        new Column[] {column("value", Types.IntegerType.unsigned(), null, true)},
+        normalizedStringSchema("ARRAY"));
+    assertIncompatible(
+        new Column[] {column("value", Types.BooleanType.get(), null, true)},
+        normalizedStringSchema("MAP"));
+    assertIncompatible(
+        new Column[] {column("value", Types.StringType.get(), null, true)},
+        normalizedStringSchema("STRUCT"));
+    assertIncompatible(
+        new Column[] {column("value", Types.StringType.get(), null, true)},
+        normalizedStringSchema("LARGEINT"));
+    assertIncompatible(
+        new Column[] {column("value", Types.IntegerType.unsigned(), null, true)},
+        normalizedStringSchema("LARGEINT"));
+    assertIncompatible(
+        new Column[] {column("value", Types.StringType.get(), null, true)},
+        normalizedStringSchema("BITMAP"));
+    assertIncompatible(
+        new Column[] {column("value", Types.BooleanType.get(), null, true)},
+        normalizedStringSchema("HLL"));
+    assertIncompatible(
+        new Column[] {column("value", Types.StringType.get(), null, true)},
+        normalizedStringSchema("HLL"));
+  }
+
+  @Test
+  void testRejectsDatetimePrecisionAndUnsignedWidthDrift() {
+    Column timestamp = column("value", Types.TimestampType.withoutTimeZone(6), null, true);
+    DorisReadSchema missingFePrecision =
+        DorisSchemaCompatibility.planReadSchema(
+            IDENTIFIER,
+            table(new Column[] {timestamp}),
+            new DorisPhysicalSchema(
+                schema(field("value", DataTypes.TimestampType, true)), Arrays.asList("DATETIMEV2")),
+            TYPE_CONVERTER);
+    assertTrue(missingFePrecision.requiresSqlExecution());
+    assertIncompatible(
+        new Column[] {timestamp},
+        new DorisPhysicalSchema(
+            schema(field("value", DataTypes.TimestampType, true)), Arrays.asList("DATETIME(3)")));
+    assertIncompatible(
+        new Column[] {timestamp},
+        new DorisPhysicalSchema(
+            schema(field("value", DataTypes.TimestampType, true)), Arrays.asList("DATETIME(7)")));
+    assertIncompatible(
+        new Column[] {timestamp},
+        new DorisPhysicalSchema(
+            schema(field("value", DataTypes.TimestampType, true)), Arrays.asList("DATETIME(foo)")));
+    assertIncompatible(
+        new Column[] {column("value", Types.TimestampType.withTimeZone(), null, true)},
+        new DorisPhysicalSchema(
+            schema(field("value", DataTypes.TimestampType, true)), Arrays.asList("DATETIME(6)")));
+    assertIncompatible(
+        new Column[] {column("value", Types.LongType.unsigned(), null, true)},
+        new DorisPhysicalSchema(
+            schema(field("value", DataTypes.StringType, true)), Arrays.asList("INT UNSIGNED")));
   }
 
   @Test
@@ -505,6 +583,11 @@ public class TestDorisSchemaCompatibility {
                 DorisSchemaCompatibility.planReadSchema(
                     IDENTIFIER, logicalTable, physicalSchema, TYPE_CONVERTER));
     assertTrue(exception.getMessage().contains("analytics.events"));
+  }
+
+  private static DorisPhysicalSchema normalizedStringSchema(String dorisTypeName) {
+    return new DorisPhysicalSchema(
+        schema(field("value", DataTypes.StringType, true)), Arrays.asList(dorisTypeName));
   }
 
   private static Table table(Column[] columns) {

@@ -43,6 +43,10 @@ public final class DorisSchemaCompatibility {
           "^(?:decimal|decimalv2|decimal32|decimal64|decimal128|decimal256)\\s*"
               + "\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*\\)$",
           Pattern.CASE_INSENSITIVE);
+  private static final Pattern DATETIME_PATTERN =
+      Pattern.compile(
+          "^(?:datetime|datetimev2)(?:\\(\\s*(\\d+)\\s*\\))?$", Pattern.CASE_INSENSITIVE);
+  private static final int MAX_DATETIME_PRECISION = 6;
 
   private DorisSchemaCompatibility() {}
 
@@ -237,8 +241,8 @@ public final class DorisSchemaCompatibility {
     if ((physicalBaseType.isEmpty()
             && isCompatibleNormalizationWithoutTypeName(
                 logicalColumn.dataType(), physicalField.dataType()))
-        || isJdbcLossyNormalizedType(physicalBaseType)
-        || isCompatibleNormalizedType(logicalColumn.dataType(), physicalBaseType)
+        || isCompatibleJdbcLossyNormalization(logicalColumn.dataType(), physicalBaseType)
+        || isCompatibleNormalizedType(logicalColumn.dataType(), dorisTypeName)
         || (isGenericJdbcPlaceholder(logicalColumn.dataType())
             && isKnownGenericNormalizedType(physicalBaseType))) {
       return;
@@ -253,22 +257,37 @@ public final class DorisSchemaCompatibility {
   private static boolean isCompatibleNormalizationWithoutTypeName(
       Type logicalType, DataType physicalType) {
     if (logicalType instanceof Types.TimestampType) {
-      return DataTypes.TimestampType.equals(physicalType);
+      return !((Types.TimestampType) logicalType).hasTimeZone()
+          && !((Types.TimestampType) logicalType).hasPrecisionSet()
+          && DataTypes.TimestampType.equals(physicalType);
     }
     return logicalType instanceof Types.BinaryType && DataTypes.BinaryType.equals(physicalType);
   }
 
-  private static boolean isJdbcLossyNormalizedType(String physicalBaseType) {
+  private static boolean isCompatibleJdbcLossyNormalization(
+      Type logicalType, String physicalBaseType) {
     // The Gravitino 1.3 Doris catalog obtains its logical schema through JDBC metadata. JDBC is
     // known to report ARRAY as its element scalar, lose MAP/STRUCT containers, report LARGEINT as
     // INTEGER, and expose sketches through generic MySQL types. These proven lossy families use
     // the FE type as the String/base64 execution authority.
-    return "array".equals(physicalBaseType)
-        || "map".equals(physicalBaseType)
-        || "struct".equals(physicalBaseType)
-        || "largeint".equals(physicalBaseType)
-        || "bitmap".equals(physicalBaseType)
-        || "hll".equals(physicalBaseType);
+    switch (physicalBaseType) {
+      case "array":
+      case "map":
+      case "struct":
+      case "largeint":
+        return isSignedIntegerPlaceholder(logicalType);
+      case "hll":
+        return isGenericJdbcPlaceholder(logicalType);
+      case "bitmap":
+        return logicalType instanceof Types.ExternalType
+            && "bit".equals(externalBaseType((Types.ExternalType) logicalType));
+      default:
+        return false;
+    }
+  }
+
+  private static boolean isSignedIntegerPlaceholder(Type logicalType) {
+    return logicalType instanceof Types.IntegerType && ((Type.IntegralType) logicalType).signed();
   }
 
   private static boolean isGenericJdbcPlaceholder(Type logicalType) {
@@ -287,9 +306,10 @@ public final class DorisSchemaCompatibility {
         || "ipv6".equals(physicalBaseType);
   }
 
-  private static boolean isCompatibleNormalizedType(Type logicalType, String physicalBaseType) {
+  private static boolean isCompatibleNormalizedType(Type logicalType, String physicalTypeName) {
+    String physicalBaseType = dorisBaseType(physicalTypeName);
     if (logicalType instanceof Types.TimestampType) {
-      return "datetime".equals(physicalBaseType) || "datetimev2".equals(physicalBaseType);
+      return isCompatibleDatetime((Types.TimestampType) logicalType, physicalTypeName);
     }
     if (logicalType instanceof Types.BinaryType) {
       return "binary".equals(physicalBaseType) || "varbinary".equals(physicalBaseType);
@@ -304,7 +324,7 @@ public final class DorisSchemaCompatibility {
       return "struct".equals(physicalBaseType);
     }
     if (logicalType instanceof Type.IntegralType && !((Type.IntegralType) logicalType).signed()) {
-      return physicalBaseType.endsWith(" unsigned");
+      return expectedUnsignedBaseType(logicalType).equals(physicalBaseType);
     }
     if (logicalType instanceof Types.ExternalType) {
       String logicalBaseType = externalBaseType((Types.ExternalType) logicalType);
@@ -314,6 +334,51 @@ public final class DorisSchemaCompatibility {
           || (isExternalDecimal(logicalBaseType) && "decimal256".equals(physicalBaseType));
     }
     return false;
+  }
+
+  private static boolean isCompatibleDatetime(
+      Types.TimestampType logicalType, String physicalTypeName) {
+    if (logicalType.hasTimeZone()) {
+      return false;
+    }
+    Matcher matcher =
+        DATETIME_PATTERN.matcher(physicalTypeName == null ? "" : physicalTypeName.trim());
+    if (!matcher.matches()) {
+      return false;
+    }
+    if (matcher.group(1) == null) {
+      // Doris /_schema omits DATETIMEV2 fractional precision. The Gravitino/JDBC logical
+      // timestamp still validates the Doris 0..6 range, and reads normalize this column to
+      // String, so the missing FE parameter is safe but cannot be used to compare DDL drift.
+      return !logicalType.hasPrecisionSet()
+          || (logicalType.precision() >= 0 && logicalType.precision() <= MAX_DATETIME_PRECISION);
+    }
+    int physicalPrecision;
+    try {
+      physicalPrecision = Integer.parseInt(matcher.group(1));
+    } catch (NumberFormatException e) {
+      return false;
+    }
+    if (physicalPrecision < 0 || physicalPrecision > MAX_DATETIME_PRECISION) {
+      return false;
+    }
+    return !logicalType.hasPrecisionSet() || logicalType.precision() == physicalPrecision;
+  }
+
+  private static String expectedUnsignedBaseType(Type logicalType) {
+    if (logicalType instanceof Types.ByteType) {
+      return "tinyint unsigned";
+    }
+    if (logicalType instanceof Types.ShortType) {
+      return "smallint unsigned";
+    }
+    if (logicalType instanceof Types.IntegerType) {
+      return "int unsigned";
+    }
+    if (logicalType instanceof Types.LongType) {
+      return "bigint unsigned";
+    }
+    return "";
   }
 
   private static boolean requiresStringNormalization(
@@ -384,7 +449,9 @@ public final class DorisSchemaCompatibility {
       DecimalType physicalType) {
     Matcher matcher = EXTERNAL_DECIMAL_PATTERN.matcher(logicalType.catalogString().trim());
     if (!matcher.matches()) {
-      return;
+      throw incompatible(
+          identifier,
+          String.format("column %s has invalid external decimal type", logicalColumn.name()));
     }
 
     int logicalPrecision;
@@ -420,12 +487,18 @@ public final class DorisSchemaCompatibility {
     Matcher logical = EXTERNAL_DECIMAL_PATTERN.matcher(logicalType.catalogString().trim());
     Matcher physical =
         EXTERNAL_DECIMAL_PATTERN.matcher(physicalTypeName == null ? "" : physicalTypeName.trim());
-    // Older compatibility catalogs may retain only the FE base type. The production Spark 3.5
-    // adapter includes FE precision and scale, so real reads take the strict branch below.
     if (!logical.matches() || !physical.matches()) {
-      return;
+      throw incompatible(
+          identifier,
+          String.format(
+              "column %s has invalid external decimal type metadata", logicalColumn.name()));
     }
-    if (!logical.group(1).equals(physical.group(1))
+    String logicalBaseType = dorisBaseType(logicalType.catalogString());
+    String physicalBaseType = dorisBaseType(physicalTypeName);
+    boolean compatibleFamily =
+        logicalBaseType.equals(physicalBaseType) || "decimal256".equals(physicalBaseType);
+    if (!compatibleFamily
+        || !logical.group(1).equals(physical.group(1))
         || !logical.group(2).equals(physical.group(2))) {
       throw incompatible(
           identifier,

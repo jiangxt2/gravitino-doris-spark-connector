@@ -17,6 +17,7 @@ package io.github.jiangxt2.gravitino.doris.server;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.util.Locale;
 import org.apache.gravitino.catalog.jdbc.converter.JdbcTypeConverter.JdbcTypeBean;
 import org.apache.gravitino.rel.types.Type;
 import org.apache.gravitino.rel.types.Types;
@@ -70,6 +71,16 @@ public class TestGovernedDorisTypeConverter {
         .isInstanceOf(IllegalArgumentException.class);
   }
 
+  @Test
+  void rejectsUnsupportedTimestampWrites() {
+    assertThatThrownBy(() -> converter.fromGravitino(Types.TimestampType.withTimeZone()))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("Doris DATETIME requires a timestamp without time zone and precision 0 to 6");
+    assertThatThrownBy(() -> converter.fromGravitino(Types.TimestampType.withoutTimeZone(7)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("Doris DATETIME requires a timestamp without time zone and precision 0 to 6");
+  }
+
   @ParameterizedTest
   @ValueSource(
       strings = {"DECIMALV2(27,9)", "DECIMAL32(9,2)", "DECIMAL64(18,3)", "DECIMAL128(38,6)"})
@@ -100,6 +111,40 @@ public class TestGovernedDorisTypeConverter {
     JdbcTypeBean bean = new JdbcTypeBean(typeName);
     Types.TimestampType type = (Types.TimestampType) converter.toGravitino(bean);
     assertThat(type.hasTimeZone()).isFalse();
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "DATETIME(foo)",
+        "DATETIME(7)",
+        "DATETIME(6,1)",
+        "DATETIME(6) trailing",
+        "DECIMAL(10,2,3)",
+        "DECIMAL(10)",
+        "CHAR",
+        "CHAR(0)",
+        "CHAR(256)",
+        "CHAR(8,2)",
+        "VARCHAR",
+        "VARCHAR(0)",
+        "VARCHAR(65534)",
+        "VARCHAR(foo)"
+      })
+  void preservesMalformedOrIncompleteParameterizedTypesAsExternal(String typeName) {
+    assertThat(convert(typeName))
+        .isEqualTo(Types.ExternalType.of(typeName.toLowerCase(Locale.ROOT)));
+  }
+
+  @Test
+  void preservesConflictingDatetimeMetadataAsExternal() {
+    JdbcTypeBean conflicting = new JdbcTypeBean("DATETIME(6)");
+    conflicting.setDatetimePrecision(3);
+    assertThat(converter.toGravitino(conflicting)).isEqualTo(Types.ExternalType.of("datetime(6)"));
+
+    JdbcTypeBean outOfRange = new JdbcTypeBean("DATETIME");
+    outOfRange.setDatetimePrecision(7);
+    assertThat(converter.toGravitino(outOfRange)).isEqualTo(Types.ExternalType.of("datetime(7)"));
   }
 
   private Type convert(String typeName) {

@@ -55,20 +55,31 @@ Spark creates a physical Doris catalog or resolves credentials. It accepts only:
   a zone identifier or dotted-quad tail;
 - one explicit port in the range `1..65535`;
 - an empty database or one database path;
-- structurally complete, non-duplicate `key=value` query parameters.
+- structurally complete, non-duplicate `key=value` query parameters from the channel table below.
 
 It rejects load-balance, replication, DNS SRV, multi-host, host sublist and host-property forms,
 URL user-info, query credentials, fragments, malformed percent encoding, and values that do not
 converge after bounded recursive decoding. JDBC credentials must come only from Gravitino's hidden
 `jdbc-user`/`jdbc-password` properties and credential vending.
 
-The following Connector/J parameter families are rejected case-insensitively, including
-percent-encoded and camel-case alias variants, wherever the driver could receive them (URL query,
-raw catalog properties, `gravitino.bypass.*`, and `connectionProperties`). The list is the
-fixed Connector/J 8.0.33 audit result for class loading, credential/file loading, endpoint
-routing, connection-time side effects, and diagnostic disclosure. Other structurally valid,
-ordinary Connector/J parameters remain compatible in `hybrid`; `strict-jdbc-tls` additionally
-rejects every unreviewed TLS control rather than silently accepting it:
+Driver and pool parameters are allow-listed by their final input channel:
+
+| Channel | Allowed names |
+| --- | --- |
+| JDBC URL query, `hybrid` | `connectTimeout`, `socketTimeout` |
+| JDBC URL query, `strict-jdbc-tls` | `connectTimeout`, `socketTimeout`, required `sslMode`, optional `fallbackToSystemTrustStore` |
+| `connectionProperties` | `connectTimeout`, `socketTimeout` |
+| `gravitino.bypass.*` | `maxIdle`, `connectTimeout`, `socketTimeout`, `connectionProperties` |
+| Spark option / `spark.bypass.*` | only the native read options listed below; all rejected by strict transport |
+
+Names are matched case-insensitively after bounded decoding. Any name not listed for its channel
+fails closed, including a future Connector/J or DBCP property. Ordinary Gravitino catalog metadata
+is not a driver parameter and remains outside these allow-lists.
+
+The following audited Connector/J families are also explicitly recognized and rejected
+case-insensitively, including percent-encoded and camel-case alias variants, before they can reach
+the driver. This fixed Connector/J 8.0.33 audit documents the security reasons behind the narrower
+allow-lists:
 
 - file/stream and deserialization sinks: `maxAllowedPacket`, `autoDeserialize`,
   `detectCustomCollations`, `allowLoadLocalInfile`, `allowUrlInLocalInfile`,
@@ -109,8 +120,9 @@ must not be supplied through `gravitino.bypass.*`.
 
 A `connectionProperties` value is parsed once with the same semicolon/newline and Java
 `Properties.load` rules used by DBCP before its effective names are validated. A nested
-`connectionProperties` name and unparseable input fail closed. Errors name only a fixed rule or
-known denied parameter and do not echo the URL, host, credential, or property value.
+`connectionProperties` name and unparseable input fail closed. Errors name only a fixed rule
+category and do not echo the URL, host, credential, user-controlled property name, or property
+value.
 
 ## Read transport profiles
 

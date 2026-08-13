@@ -6,7 +6,7 @@ framework classes or add `mavenLocal`/snapshot dependencies.
 Before proposing a change, run:
 
 ```bash
-./gradlew spotlessCheck test installDist \
+./gradlew spotlessCheck test installDist rat \
   :distribution:resolveDistributionLocks \
   :distribution:verifyDistributionDependencyContract \
   verifySparkDependencyVersions
@@ -17,6 +17,10 @@ Before proposing a change, run:
 Every behavior change needs a focused unit test. Database, planner, credential, container, or
 integration changes also need the corresponding real-infrastructure test. Never skip a failing test
 to obtain a green build.
+
+Java compilation runs Error Prone together with `-Xlint:all -Werror`. The root `rat` task checks
+source and comment-capable configuration files for Apache License headers; exclusions are limited
+to generated metadata, wrapper artifacts, Markdown, and other fixed non-header file formats.
 
 ## Updating dependencies
 

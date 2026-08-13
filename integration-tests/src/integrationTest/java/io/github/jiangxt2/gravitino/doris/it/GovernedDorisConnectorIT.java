@@ -16,8 +16,8 @@ package io.github.jiangxt2.gravitino.doris.it;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertAll;
-import static org.testcontainers.shaded.org.awaitility.Awaitility.await;
 
 import com.google.common.collect.ImmutableList;
 import io.github.jiangxt2.gravitino.doris.spark.GovernedDorisSparkPlugin;
@@ -53,6 +53,7 @@ import org.apache.gravitino.client.GravitinoClient;
 import org.apache.gravitino.client.GravitinoMetalake;
 import org.apache.gravitino.exceptions.ForbiddenException;
 import org.apache.gravitino.rel.TableCatalog;
+import org.apache.gravitino.rel.TableChange;
 import org.apache.gravitino.rel.types.Type;
 import org.apache.gravitino.rel.types.Types;
 import org.apache.logging.log4j.LogManager;
@@ -715,6 +716,27 @@ public class GovernedDorisConnectorIT {
     identityOverride.put("gravitino.bypass.url", "jdbc:mysql://" + maliciousSecret + ":9030/");
     unsafeProperties.add(identityOverride);
 
+    Map<String, String> unknownUrlParameter =
+        catalogProperties(false, tcpProxy.jdbcUrl(RecordingDorisTcpProxy.Lane.DENIAL));
+    unknownUrlParameter.put(
+        "jdbc-url",
+        tcpProxy.jdbcUrl(RecordingDorisTcpProxy.Lane.DENIAL)
+            + "?unknown-"
+            + maliciousSecret
+            + "=true");
+    unsafeProperties.add(unknownUrlParameter);
+
+    Map<String, String> unknownBypass =
+        catalogProperties(false, tcpProxy.jdbcUrl(RecordingDorisTcpProxy.Lane.DENIAL));
+    unknownBypass.put("gravitino.bypass.unknown-" + maliciousSecret, "true");
+    unsafeProperties.add(unknownBypass);
+
+    Map<String, String> unknownConnectionProperty =
+        catalogProperties(false, tcpProxy.jdbcUrl(RecordingDorisTcpProxy.Lane.DENIAL));
+    unknownConnectionProperty.put(
+        "gravitino.bypass.connectionProperties", "unknown-" + maliciousSecret + "=true");
+    unsafeProperties.add(unknownConnectionProperty);
+
     for (int index = 0; index < unsafeProperties.size(); index++) {
       String catalogName = "unsafe_jdbc_catalog_" + index;
       Map<String, String> properties = unsafeProperties.get(index);
@@ -732,6 +754,28 @@ public class GovernedDorisConnectorIT {
           .hasMessageNotContaining(properties.get("jdbc-url"));
     }
     assertDeniedIoRemainsZero(reset.generation());
+  }
+
+  @Test
+  @Order(81)
+  void rejectsUnsupportedTimestampMutationBeforeChangingDorisSchema() throws Exception {
+    TableCatalog tableCatalog = governedClient.loadCatalog(CATALOG).asTableCatalog();
+    NameIdentifier identifier = NameIdentifier.of(SCHEMA, DRIFT_TABLE);
+    Map<String, String> before = jdbcColumnTypes(DRIFT_TABLE);
+
+    assertThatThrownBy(
+            () ->
+                tableCatalog.alterTable(
+                    identifier,
+                    TableChange.addColumn(
+                        new String[] {"unsupported_timestamp"},
+                        Types.TimestampType.withTimeZone(),
+                        true)))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(
+            "Doris DATETIME requires a timestamp without time zone and precision 0 to 6")
+        .hasMessageNotContaining(DorisTestCluster.TEST_PASSWORD);
+    assertThat(jdbcColumnTypes(DRIFT_TABLE)).isEqualTo(before);
   }
 
   @Test
@@ -988,30 +1032,31 @@ public class GovernedDorisConnectorIT {
       assertThat(feProxy.requestCount("GET", path)).isEqualTo(3);
     } catch (Throwable failure) {
       testFailure = failure;
-      throw failure;
-    } finally {
-      Throwable cleanupFailure = null;
-      try {
-        restoreDriftTable(sparkCatalog, identifier, qualifiedTable);
-      } catch (Throwable failure) {
+    }
+
+    Throwable cleanupFailure = null;
+    try {
+      restoreDriftTable(sparkCatalog, identifier, qualifiedTable);
+    } catch (Throwable failure) {
+      cleanupFailure = failure;
+    }
+    try {
+      strictSparkCatalog.invalidateTable(identifier);
+    } catch (Throwable failure) {
+      if (cleanupFailure == null) {
         cleanupFailure = failure;
+      } else {
+        cleanupFailure.addSuppressed(failure);
       }
-      try {
-        strictSparkCatalog.invalidateTable(identifier);
-      } catch (Throwable failure) {
-        if (cleanupFailure == null) {
-          cleanupFailure = failure;
-        } else {
-          cleanupFailure.addSuppressed(failure);
-        }
-      }
+    }
+    if (testFailure != null) {
       if (cleanupFailure != null) {
-        if (testFailure != null) {
-          testFailure.addSuppressed(cleanupFailure);
-        } else {
-          throw cleanupFailure;
-        }
+        testFailure.addSuppressed(cleanupFailure);
       }
+      throw testFailure;
+    }
+    if (cleanupFailure != null) {
+      throw cleanupFailure;
     }
   }
 

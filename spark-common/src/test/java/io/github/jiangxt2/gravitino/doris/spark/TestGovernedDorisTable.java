@@ -16,6 +16,7 @@ package io.github.jiangxt2.gravitino.doris.spark;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -83,7 +84,7 @@ public class TestGovernedDorisTable {
     assertEquals("analytics.Events", table.name());
     assertSame(schema, table.schema());
     assertEquals(ImmutableSet.of(TableCapability.BATCH_READ), table.capabilities());
-    assertTrue(table instanceof SupportsWrite);
+    assertInstanceOf(SupportsWrite.class, table);
     assertEquals("1", table.properties().get("replication_num"));
     assertEquals("governed table", table.properties().get(ConnectorConstants.COMMENT));
     assertFalse(table.properties().containsKey("jdbc-password"));

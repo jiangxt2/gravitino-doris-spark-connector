@@ -13,13 +13,15 @@ java -version
 ## Static and unit gates
 
 ```bash
-./gradlew spotlessCheck test installDist \
+./gradlew spotlessCheck test installDist rat \
   :distribution:resolveDistributionLocks \
   :distribution:verifyDistributionDependencyContract \
   verifySparkDependencyVersions
 ```
 
-These tasks cover property protection, credential resolution, explicit authorization ordering,
+Java compilation includes Error Prone and `-Xlint:all -Werror`; RAT checks Java, Gradle, and
+comment-capable configuration sources with narrow format/generated-file exclusions. These tasks
+cover property protection, credential resolution, explicit authorization ordering,
 schema/type compatibility, cache behavior, hybrid planner state, capability filtering, plugin
 registration, provider loading, distribution assembly, repository container-label configuration,
 resolved Spark-module version consistency, immutable workflow action references, and the shared
@@ -74,8 +76,11 @@ production distribution form. The negative Admin API catalog creation must fail 
 installation guidance while FE HTTP and MySQL/JDBC TCP counters remain zero.
 
 The tests verify direct-result parity, planner pushdown, four-partition JDBC parity, type
-normalization, authorization-before-I/O, cache/refresh, credential redaction, JDBC configuration
-rejection, read-only boundaries, and strict JDBC TLS transport.
+normalization, authorization-before-I/O, cache/refresh, unsupported timestamp mutation before
+physical schema change, credential redaction, JDBC configuration rejection, read-only boundaries,
+and strict JDBC TLS transport. The logical/physical scalar and lossy-placeholder rejection matrix
+is exercised in focused unit tests because a real DDL changes both provider metadata and physical
+schema and cannot independently manufacture that mismatch.
 
 The harness creates a private CA, valid FE certificate, expired certificate, unrelated self-signed
 certificate, and client JVM truststore under `integration-tests/build/tmp`. Nothing containing a
@@ -115,13 +120,14 @@ BE/native ports, so the evidence must not be described as direct observation of 
 traffic.
 
 The JDBC security unit matrix covers the exact driver, ordinary URL grammar, malformed and encoded
-forms, embedded credentials, dangerous Connector/J names, raw and encoded
-`gravitino.bypass.*` keys, DBCP class-loading/identity/eager-init/SQL-execution/exposure properties,
-Connector/J file/authentication targets and diagnostic-disclosure switches,
-and one-level `connectionProperties` parsing with semicolons, newlines, continuation, Unicode, and
-malformed escapes. Deeply nested `connectionProperties` must fail with a bounded validation error,
-never `StackOverflowError`. Malicious catalog creation, including `connectionInitSqls`, is also
-exercised through the real Gravitino Admin API and must leave both recorders unchanged.
+forms, embedded credentials, the per-channel allow-lists, dangerous Connector/J names, raw and
+encoded `gravitino.bypass.*` keys, DBCP class-loading/identity/eager-init/SQL-execution/exposure
+properties, and one-level `connectionProperties` parsing with semicolons, newlines, continuation,
+Unicode, and malformed escapes. Unknown URL, bypass, and connection-property names fail with fixed
+messages that do not echo an injected canary. Deeply nested `connectionProperties` must fail with
+a bounded validation error, never `StackOverflowError`. Malicious catalog creation, including
+unknown names and `connectionInitSqls`, is also exercised through the real Gravitino Admin API and
+must leave both recorders unchanged.
 
 A directly registered Spark JDBC V2 catalog is the partition-count, lossless-column, aggregate-plan,
 and timing baseline. It uses the same `JDBCTableCatalog/JDBCTable` implementation as Gravitino's
@@ -142,11 +148,11 @@ DDL rejection category. No version branch skips a probe.
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `BOOLEAN`, `TINYINT`, `SMALLINT`, `INT`, `BIGINT`, `FLOAT`, `DOUBLE`, `DECIMAL(p,s)`, `DATE`, `CHAR(n)`, `VARCHAR(n)`, `STRING`/`TEXT` | DDL, insert, and read | DDL, insert, and read | matching scalar family; `TEXT` stays `text` | matching typed scalar | typed Catalyst scalar | direct, native detail scan | `typed` |
 | `DATETIME(6)` | DDL, insert, and read | DDL, insert, and read | `datetime(6)` | timestamp without time zone | String | direct text, SQL scan | `String` |
-| `ARRAY<INT>`, `MAP<STRING,INT>`, `STRUCT<...>` | DDL, insert, and read | DDL, insert, and read | matching container family | JDBC-lossy scalar/String form | String | direct text, SQL scan | `String` |
+| `ARRAY<INT>`, `MAP<STRING,INT>`, `STRUCT<...>` | DDL, insert, and read | DDL, insert, and read | matching container family | JDBC-lossy signed-integer placeholder | String | direct text, SQL scan | `String` |
 | `LARGEINT` | DDL, insert, and read | DDL, insert, and read | `largeint` | JDBC-lossy integer form | String | direct text, SQL scan | `String` |
 | `JSON`; `JSONB` probe | DDL, insert, and read | DDL, insert, and read | `json`; `JSONB` is normalized to `json` | `external(json)` | String | direct text, SQL scan | `String` |
 | `VARIANT`, `IPV4`, `IPV6` | DDL, insert, and read | DDL, insert, and read | matching Doris-specific family | external/generic metadata reconciled with the known FE family | String | direct text, SQL scan | `String` |
-| `BITMAP`, `HLL` | DDL, insert, and read | DDL, insert, and read | matching sketch family | JDBC-lossy external/String form | String | `BITMAP_TO_BASE64`/`HLL_TO_BASE64`, SQL scan | `base64` |
+| `BITMAP`, `HLL` | DDL, insert, and read | DDL, insert, and read | matching sketch family | `external(bit)` / `external(unknown|other)` placeholder | String | `BITMAP_TO_BASE64`/`HLL_TO_BASE64`, SQL scan | `base64` |
 | `DECIMAL(76,6)` | DDL rejected (`42000`/`1235`) | DDL, insert, and read after `enable_decimal256=true` | `decimal(76,6)` on 4.0.6 | `external(decimal(76,6))` | String | direct text, SQL scan on 4.0.6 | `probe-only` on 3.0.6.2; `String` on 4.0.6 |
 | `DECIMALV2(18,3)`, `DECIMAL32(9,2)`, `DECIMAL64(18,3)`, `DECIMAL128(38,6)` | DDL rejected (`HY000`/`1105`) | DDL rejected (`HY000`/`1105`) | none | none | none | none | `probe-only` |
 | `BINARY`, `VARBINARY`, `TIME`, `TINYINT UNSIGNED`, `SMALLINT UNSIGNED`, `INT UNSIGNED`, `BIGINT UNSIGNED` | DDL rejected (`HY000`/`1105`) | DDL rejected (`HY000`/`1105`) | none | none | none | none | `probe-only` |

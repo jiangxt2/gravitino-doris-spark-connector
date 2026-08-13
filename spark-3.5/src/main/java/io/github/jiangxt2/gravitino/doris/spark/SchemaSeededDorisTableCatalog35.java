@@ -19,6 +19,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import org.apache.doris.spark.catalog.DorisTableCatalog;
 import org.apache.doris.spark.config.DorisConfig;
 import org.apache.doris.spark.config.DorisOptions;
@@ -42,7 +43,7 @@ import scala.collection.immutable.Map$;
 // DorisTableCatalog 26.0.0 implements Spark varargs methods with array parameters, which javac
 // reports on subclasses even though this adapter does not override those methods.
 @SuppressWarnings("overrides")
-public class SchemaSeededDorisTableCatalog35 extends DorisTableCatalog {
+class SchemaSeededDorisTableCatalog35 extends DorisTableCatalog {
 
   private Map<String, String> catalogOptions;
 
@@ -60,7 +61,7 @@ public class SchemaSeededDorisTableCatalog35 extends DorisTableCatalog {
    * @param connectionInfo the credential-vended JDBC connection material
    * @return a read-only hybrid Doris table
    */
-  public Table loadTable(
+  Table loadTable(
       Identifier identifier,
       DorisReadSchema readSchema,
       DorisJdbcConnectionInfo connectionInfo,
@@ -100,7 +101,7 @@ public class SchemaSeededDorisTableCatalog35 extends DorisTableCatalog {
   }
 
   /** Loads one FE schema response while retaining the original Doris type names. */
-  public DorisPhysicalSchema loadPhysicalSchema(Identifier identifier) {
+  DorisPhysicalSchema loadPhysicalSchema(Identifier identifier) {
     DorisChecks.checkArgument(
         identifier.namespace().length == 1,
         "Doris table identifiers require exactly one schema: %s",
@@ -116,8 +117,6 @@ public class SchemaSeededDorisTableCatalog35 extends DorisTableCatalog {
         typeNames.add(typeNameWithParameters(field));
       }
       return new DorisPhysicalSchema(DataTypes.createStructType(fields), typeNames);
-    } catch (RuntimeException e) {
-      throw e;
     } catch (Exception e) {
       // Do not retain the Connector exception because its request context includes credentials.
       throw new IllegalArgumentException(
@@ -126,22 +125,32 @@ public class SchemaSeededDorisTableCatalog35 extends DorisTableCatalog {
   }
 
   static DataType toCatalystTypeOrString(String typeName, int precision, int scale) {
+    Objects.requireNonNull(typeName, "Doris FE type name is required");
     try {
       return SchemaConvertors.toCatalystType(typeName, precision, scale);
+    } catch (RuntimeException e) {
+      throw e;
     } catch (Exception e) {
       // Connector 26.0.0 throws a checked Exception for unrecognized FE types even though the
-      // generated Java signature only declares IllegalArgumentException. Keep this catch scoped to
-      // one field conversion so that FE transport and response failures still fail closed.
-      return DataTypes.StringType;
+      // generated Java signature only declares IllegalArgumentException. Match that fixed upstream
+      // failure shape narrowly so that malformed known types and other conversion failures still
+      // fail closed.
+      if (e.getClass().equals(Exception.class)
+          && e.getMessage() != null
+          && e.getMessage().startsWith("Unrecognized Doris type")) {
+        return DataTypes.StringType;
+      }
+      throw new IllegalArgumentException("Failed to convert Doris FE type");
     }
   }
 
-  private static String typeNameWithParameters(Field field) {
+  static String typeNameWithParameters(Field field) {
     String typeName = field.getType();
-    if (typeName != null
-        && typeName.toLowerCase(Locale.ROOT).startsWith("decimal")
-        && typeName.indexOf('(') < 0
-        && field.getPrecision() > 0) {
+    if (typeName == null || typeName.indexOf('(') >= 0) {
+      return typeName;
+    }
+    String baseType = typeName.toLowerCase(Locale.ROOT);
+    if (baseType.startsWith("decimal") && field.getPrecision() > 0) {
       return String.format(
           Locale.ROOT, "%s(%d,%d)", typeName, field.getPrecision(), field.getScale());
     }

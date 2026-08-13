@@ -75,7 +75,8 @@ public class TestGovernedDorisCatalogProvider {
     unsafe.put("gravitino.bypass.connectionFactoryClassName", "example.SecretCanary");
     assertThatThrownBy(() -> provider.withCatalogConf(unsafe))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("connectionFactoryClassName")
+        .hasMessage("Unreviewed JDBC connection pool property is not allowed")
+        .hasMessageNotContaining("connectionFactoryClassName")
         .hasMessageNotContaining("SecretCanary");
   }
 

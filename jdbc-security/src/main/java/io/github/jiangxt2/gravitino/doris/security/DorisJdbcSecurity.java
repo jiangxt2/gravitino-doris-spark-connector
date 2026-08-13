@@ -18,6 +18,7 @@ import java.io.IOException;
 import java.io.StringReader;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -40,6 +41,14 @@ public final class DorisJdbcSecurity {
   private static final String SPARK_BYPASS_PREFIX = "spark.bypass.";
   private static final String CONNECTION_PROPERTIES = "connectionproperties";
   private static final int MAX_DECODE_PASSES = 5;
+  private static final Set<String> URL_PARAMETER_ALLOWLIST =
+      Set.of("connecttimeout", "sockettimeout");
+  private static final Set<String> STRICT_URL_PARAMETER_ALLOWLIST =
+      Set.of("sslmode", "fallbacktosystemtruststore");
+  private static final Set<String> CONNECTION_PROPERTY_ALLOWLIST =
+      Set.of("connecttimeout", "sockettimeout");
+  private static final Set<String> BYPASS_PROPERTY_ALLOWLIST =
+      Set.of("maxidle", "connecttimeout", "sockettimeout", CONNECTION_PROPERTIES);
 
   private static final Map<String, String> UNSAFE_MYSQL_PARAMETERS =
       normalizedNames(
@@ -146,15 +155,6 @@ public final class DorisJdbcSecurity {
           DORIS_FE_NODES,
           DORIS_QUERY_PORT);
 
-  private static final Set<String> STRICT_TLS_REJECTED_PARAMETERS =
-      Set.of(
-          "trustcertificatekeystoreurl",
-          "trustcertificatekeystorepassword",
-          "trustcertificatekeystoretype",
-          "usessl",
-          "requiressl",
-          "verifyservercertificate");
-
   private DorisJdbcSecurity() {}
 
   /**
@@ -195,7 +195,7 @@ public final class DorisJdbcSecurity {
     if (properties == null) {
       throw new IllegalArgumentException("Doris JDBC catalog properties are required");
     }
-    Set<String> seenCanonicalProperties = new java.util.HashSet<>();
+    Set<String> seenCanonicalProperties = new HashSet<>();
     for (Map.Entry<String, String> entry : properties.entrySet()) {
       String rawName = entry.getKey();
       if (rawName == null || rawName.isEmpty()) {
@@ -206,7 +206,7 @@ public final class DorisJdbcSecurity {
       if (CANONICAL_PROFILE_PROPERTIES.contains(normalizedName)) {
         if (!rawName.equals(normalizedName) || !seenCanonicalProperties.add(normalizedName)) {
           throw new IllegalArgumentException(
-              "Catalog property '" + normalizedName + "' must use its canonical name once");
+              "Governed Doris profile properties must use their canonical names once");
         }
       }
     }
@@ -218,15 +218,15 @@ public final class DorisJdbcSecurity {
 
     for (Map.Entry<String, String> entry : properties.entrySet()) {
       String decodedName = stableDecode(entry.getKey(), "JDBC property name encoding is invalid");
-      validatePropertyName(decodedName, entry.getValue(), true, strictTransport);
       if (decodedName.regionMatches(true, 0, BYPASS_PREFIX, 0, BYPASS_PREFIX.length())) {
         validateBypassPropertyName(
             decodedName.substring(BYPASS_PREFIX.length()), entry.getValue(), strictTransport);
-      }
-      if (decodedName.regionMatches(
+      } else if (decodedName.regionMatches(
           true, 0, SPARK_BYPASS_PREFIX, 0, SPARK_BYPASS_PREFIX.length())) {
         validateSparkBypassPropertyName(
             decodedName.substring(SPARK_BYPASS_PREFIX.length()), strictTransport);
+      } else {
+        validateDirectCatalogProperty(decodedName, entry.getValue(), strictTransport);
       }
     }
   }
@@ -308,7 +308,7 @@ public final class DorisJdbcSecurity {
 
     validateAuthority(authority);
     validateDatabase(database);
-    Map<String, String> parameters = validateQuery(query);
+    Map<String, String> parameters = validateQuery(query, strictTransport);
     if (strictTransport) {
       validateStrictTlsParameters(parameters);
     }
@@ -373,7 +373,7 @@ public final class DorisJdbcSecurity {
     }
   }
 
-  private static Map<String, String> validateQuery(String query) {
+  private static Map<String, String> validateQuery(String query, boolean strictTransport) {
     Map<String, String> parameters = new LinkedHashMap<>();
     if (query == null) {
       return parameters;
@@ -382,7 +382,7 @@ public final class DorisJdbcSecurity {
       throw invalidUrl();
     }
 
-    Set<String> seenNames = new java.util.HashSet<>();
+    Set<String> seenNames = new HashSet<>();
     for (String assignment : query.split("&", -1)) {
       int equals = assignment.indexOf('=');
       if (equals <= 0) {
@@ -396,7 +396,10 @@ public final class DorisJdbcSecurity {
       if (!seenNames.add(normalized)) {
         throw new IllegalArgumentException("Duplicate Doris JDBC URL parameter is not allowed");
       }
-      rejectKnownParameter(normalized);
+      if (!URL_PARAMETER_ALLOWLIST.contains(normalized)
+          && !(strictTransport && STRICT_URL_PARAMETER_ALLOWLIST.contains(normalized))) {
+        throw new IllegalArgumentException("Unreviewed Doris JDBC URL parameter is not allowed");
+      }
       parameters.put(
           normalized,
           stableDecode(assignment.substring(equals + 1), "Doris JDBC URL encoding is invalid"));
@@ -422,12 +425,11 @@ public final class DorisJdbcSecurity {
         }
         continue;
       }
-      if (STRICT_TLS_REJECTED_PARAMETERS.contains(name)
-          || name.startsWith("ssltruststore")
-          || isTlsControlParameter(name)) {
-        throw new IllegalArgumentException(
-            "Unreviewed JDBC TLS parameters are not allowed in strict transport");
+      if (URL_PARAMETER_ALLOWLIST.contains(name)) {
+        continue;
       }
+      throw new IllegalArgumentException(
+          "Unreviewed JDBC TLS parameters are not allowed in strict transport");
     }
   }
 
@@ -435,17 +437,20 @@ public final class DorisJdbcSecurity {
       String name, String value, boolean strictTransport) {
     String normalized = normalize(name, "JDBC property name encoding is invalid");
     if (PROTECTED_BYPASS_PROPERTIES.contains(normalized)) {
-      throw new IllegalArgumentException(
-          "Protected JDBC property '" + normalized + "' must not use gravitino.bypass");
+      throw new IllegalArgumentException("Protected JDBC properties must not use gravitino.bypass");
     }
-    validatePropertyName(name, value, true, strictTransport);
+    if (!BYPASS_PROPERTY_ALLOWLIST.contains(normalized)) {
+      throw new IllegalArgumentException("Unreviewed JDBC connection pool property is not allowed");
+    }
+    if (CONNECTION_PROPERTIES.equals(normalized)) {
+      validateConnectionProperties(value, strictTransport);
+    }
   }
 
   private static void validateSparkBypassPropertyName(String name, boolean strictTransport) {
     String normalized = normalize(name, "JDBC property name encoding is invalid");
     if (PROTECTED_BYPASS_PROPERTIES.contains(normalized)) {
-      throw new IllegalArgumentException(
-          "Protected JDBC property '" + normalized + "' must not use spark.bypass");
+      throw new IllegalArgumentException("Protected JDBC properties must not use spark.bypass");
     }
     if (strictTransport && normalized.startsWith("doris.")) {
       throw new IllegalArgumentException(
@@ -453,16 +458,14 @@ public final class DorisJdbcSecurity {
     }
   }
 
-  private static void validatePropertyName(
-      String name, String value, boolean allowConnectionProperties, boolean strictTransport) {
+  private static void validateDirectCatalogProperty(
+      String name, String value, boolean strictTransport) {
     if (name == null || name.isEmpty()) {
       throw new IllegalArgumentException("JDBC property name is invalid");
     }
     String normalized = normalize(name, "JDBC property name encoding is invalid");
-    String unsafePoolProperty = UNSAFE_POOL_PROPERTIES.get(normalized);
-    if (unsafePoolProperty != null) {
-      throw new IllegalArgumentException(
-          "Unsafe JDBC connection pool property '" + unsafePoolProperty + "' is not allowed");
+    if (UNSAFE_POOL_PROPERTIES.containsKey(normalized)) {
+      throw new IllegalArgumentException("Unreviewed JDBC connection pool property is not allowed");
     }
     rejectKnownParameter(normalized);
     if (strictTransport && isTlsControlParameter(normalized)) {
@@ -470,9 +473,6 @@ public final class DorisJdbcSecurity {
           "JDBC TLS properties are not allowed outside the canonical URL");
     }
     if (CONNECTION_PROPERTIES.equals(normalized)) {
-      if (!allowConnectionProperties) {
-        throw new IllegalArgumentException("Nested JDBC connectionProperties is not allowed");
-      }
       validateConnectionProperties(value, strictTransport);
     }
   }
@@ -488,7 +488,17 @@ public final class DorisJdbcSecurity {
       throw new IllegalArgumentException("Unable to validate JDBC connectionProperties");
     }
     for (String name : parsed.stringPropertyNames()) {
-      validatePropertyName(name, parsed.getProperty(name), false, strictTransport);
+      String normalized = normalize(name, "JDBC property name encoding is invalid");
+      if (CONNECTION_PROPERTIES.equals(normalized)) {
+        throw new IllegalArgumentException("Nested JDBC connectionProperties is not allowed");
+      }
+      if (!CONNECTION_PROPERTY_ALLOWLIST.contains(normalized)) {
+        throw new IllegalArgumentException("Unreviewed JDBC connection property is not allowed");
+      }
+      if (strictTransport && isTlsControlParameter(normalized)) {
+        throw new IllegalArgumentException(
+            "JDBC TLS properties are not allowed outside the canonical URL");
+      }
     }
   }
 
@@ -528,10 +538,8 @@ public final class DorisJdbcSecurity {
       throw new IllegalArgumentException(
           "JDBC credentials must not be embedded in connection configuration");
     }
-    String unsafeParameter = UNSAFE_MYSQL_PARAMETERS.get(normalized);
-    if (unsafeParameter != null) {
-      throw new IllegalArgumentException(
-          "Unsafe Doris JDBC parameter '" + unsafeParameter + "' is not allowed");
+    if (UNSAFE_MYSQL_PARAMETERS.containsKey(normalized)) {
+      throw new IllegalArgumentException("Unreviewed Doris JDBC parameter is not allowed");
     }
   }
 

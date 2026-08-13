@@ -37,11 +37,24 @@ public class TestDorisJdbcSecurity {
         "jdbc:mysql://127.0.0.1:9030/analytics",
         "jdbc:mysql://doris-fe.example.com:9030?socketTimeout=1000",
         "jdbc:mysql://[2001:db8:0:1:2:3:4:5]:9030/analytics",
-        "jdbc:mysql://[2001:db8::1]:9030/analytics?connectTimeout=1000&sslMode=VERIFY_IDENTITY"
+        "jdbc:mysql://[2001:db8::1]:9030/analytics?connectTimeout=1000"
       })
   void acceptsSupportedOrdinaryUrls(String url) {
     assertThatCode(() -> DorisJdbcSecurity.validateConnection(url, DRIVER))
         .doesNotThrowAnyException();
+  }
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "jdbc:mysql://fe:9030/?description=secret-canary",
+        "jdbc:mysql://fe:9030/?connectTimeout=1000&unknown-secret-canary=true"
+      })
+  void rejectsUnknownUrlParametersWithoutDisclosingTheirNames(String url) {
+    assertThatThrownBy(() -> DorisJdbcSecurity.validateConnection(url, DRIVER))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("Unreviewed Doris JDBC URL parameter is not allowed")
+        .hasMessageNotContaining("secret-canary");
   }
 
   @ParameterizedTest
@@ -136,30 +149,30 @@ public class TestDorisJdbcSecurity {
                 DorisJdbcSecurity.validateConnection(
                     "jdbc:mysql://fe:9030/?" + parameter + "=true", DRIVER))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("Unsafe Doris JDBC parameter")
-        .hasMessageContaining(parameter);
+        .hasMessage("Unreviewed Doris JDBC URL parameter is not allowed")
+        .hasMessageNotContaining(parameter);
 
     Map<String, String> properties = validServerProperties();
     properties.put("gravitino.bypass." + parameter.toUpperCase(Locale.ROOT), "true");
     assertThatThrownBy(() -> DorisJdbcSecurity.validateServerCatalogProperties(properties))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("Unsafe Doris JDBC parameter")
-        .hasMessageContaining(parameter);
+        .hasMessage("Unreviewed JDBC connection pool property is not allowed")
+        .hasMessageNotContaining(parameter);
 
     Map<String, String> direct = validServerProperties();
     direct.put(parameter.toUpperCase(Locale.ROOT), "true");
     assertThatThrownBy(() -> DorisJdbcSecurity.validateServerCatalogProperties(direct))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("Unsafe Doris JDBC parameter")
-        .hasMessageContaining(parameter);
+        .hasMessage("Unreviewed Doris JDBC parameter is not allowed")
+        .hasMessageNotContaining(parameter);
 
     Map<String, String> connectionProperties = validServerProperties();
     connectionProperties.put("gravitino.bypass.connectionProperties", parameter + "=true");
     assertThatThrownBy(
             () -> DorisJdbcSecurity.validateServerCatalogProperties(connectionProperties))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("Unsafe Doris JDBC parameter")
-        .hasMessageContaining(parameter);
+        .hasMessage("Unreviewed JDBC connection property is not allowed")
+        .hasMessageNotContaining(parameter);
   }
 
   @ParameterizedTest
@@ -183,14 +196,14 @@ public class TestDorisJdbcSecurity {
     direct.put(property.toUpperCase(Locale.ROOT), "secret-canary");
     assertThatThrownBy(() -> DorisJdbcSecurity.validateServerCatalogProperties(direct))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("Unsafe JDBC connection pool property")
+        .hasMessage("Unreviewed JDBC connection pool property is not allowed")
         .hasMessageNotContaining("secret-canary");
 
     Map<String, String> bypass = validServerProperties();
     bypass.put("gravitino.bypass." + property, "secret-canary");
     assertThatThrownBy(() -> DorisJdbcSecurity.validateServerCatalogProperties(bypass))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("Unsafe JDBC connection pool property")
+        .hasMessage("Unreviewed JDBC connection pool property is not allowed")
         .hasMessageNotContaining("secret-canary");
   }
 
@@ -208,7 +221,7 @@ public class TestDorisJdbcSecurity {
 
     assertThatThrownBy(() -> DorisJdbcSecurity.validateServerCatalogProperties(properties))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("Protected JDBC property")
+        .hasMessage("Protected JDBC properties must not use gravitino.bypass")
         .hasMessageNotContaining("bypass-secret-canary");
   }
 
@@ -229,7 +242,7 @@ public class TestDorisJdbcSecurity {
 
     assertThatThrownBy(() -> DorisJdbcSecurity.validateServerCatalogProperties(properties))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("Unsafe JDBC connection pool property")
+        .hasMessage("Unreviewed JDBC connection pool property is not allowed")
         .hasMessageNotContaining("secret-canary");
   }
 
@@ -255,7 +268,8 @@ public class TestDorisJdbcSecurity {
       properties.put(key, "auto%2544eserialize=true");
       assertThatThrownBy(() -> DorisJdbcSecurity.validateServerCatalogProperties(properties))
           .isInstanceOf(IllegalArgumentException.class)
-          .hasMessageContaining("autoDeserialize");
+          .hasMessage("Unreviewed JDBC connection property is not allowed")
+          .hasMessageNotContaining("autoDeserialize");
     }
 
     Map<String, String> nullValue = validServerProperties();
@@ -281,15 +295,38 @@ public class TestDorisJdbcSecurity {
   }
 
   @Test
-  void acceptsSafePropertiesAndDoesNotMatchUnsafeWordsInValues() {
+  void acceptsAllowedPropertiesAndDoesNotMatchUnsafeWordsInValues() {
     Map<String, String> properties = validServerProperties();
     properties.put("gravitino.bypass.socketTimeout", "1000");
-    properties.put(
-        "gravitino.bypass.connectionProperties",
-        "connectTimeout=1000;description=autoDeserialize;safeAutoDeserializeSuffix=true");
+    properties.put("gravitino.bypass.maxIdle", "0");
+    properties.put("gravitino.bypass.connectionProperties", "connectTimeout=autoDeserialize");
 
     assertThatCode(() -> DorisJdbcSecurity.validateServerCatalogProperties(properties))
         .doesNotThrowAnyException();
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"gravitino.bypass.description", "gravitino.bypass.unknown-secret-canary"})
+  void rejectsUnknownBypassPropertiesWithoutDisclosingTheirNames(String property) {
+    Map<String, String> properties = validServerProperties();
+    properties.put(property, "value-secret-canary");
+
+    assertThatThrownBy(() -> DorisJdbcSecurity.validateServerCatalogProperties(properties))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("Unreviewed JDBC connection pool property is not allowed")
+        .hasMessageNotContaining("secret-canary");
+  }
+
+  @Test
+  void rejectsUnknownConnectionPropertiesWithoutDisclosingTheirNames() {
+    Map<String, String> properties = validServerProperties();
+    properties.put(
+        "gravitino.bypass.connectionProperties", "unknown-secret-canary=value-secret-canary");
+
+    assertThatThrownBy(() -> DorisJdbcSecurity.validateServerCatalogProperties(properties))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("Unreviewed JDBC connection property is not allowed")
+        .hasMessageNotContaining("secret-canary");
   }
 
   @Test
@@ -406,7 +443,8 @@ public class TestDorisJdbcSecurity {
 
     assertThatThrownBy(() -> DorisJdbcSecurity.validateServerCatalogProperties(properties))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining(canonical);
+        .hasMessage("Governed Doris profile properties must use their canonical names once")
+        .hasMessageNotContaining(canonical);
   }
 
   @Test
@@ -415,7 +453,8 @@ public class TestDorisJdbcSecurity {
             () ->
                 DorisJdbcSecurity.validateConnection(
                     "jdbc:mysql://fe:9030/?auto%2544eserialize=true", DRIVER))
-        .hasMessageContaining("autoDeserialize");
+        .hasMessage("Unreviewed Doris JDBC URL parameter is not allowed")
+        .hasMessageNotContaining("autoDeserialize");
     assertThatThrownBy(
             () ->
                 DorisJdbcSecurity.validateConnection(
@@ -447,7 +486,8 @@ public class TestDorisJdbcSecurity {
       Map<String, String> properties = validServerProperties();
       properties.put("gravitino.bypass.INITIALSIZE", "1");
       assertThatThrownBy(() -> DorisJdbcSecurity.validateServerCatalogProperties(properties))
-          .hasMessageContaining("initialSize");
+          .hasMessage("Unreviewed JDBC connection pool property is not allowed")
+          .hasMessageNotContaining("initialSize");
     } finally {
       Locale.setDefault(original);
     }

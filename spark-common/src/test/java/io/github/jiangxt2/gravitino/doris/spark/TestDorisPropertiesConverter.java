@@ -196,7 +196,7 @@ public class TestDorisPropertiesConverter {
                 converter.toSparkCatalogProperties(
                     new CaseInsensitiveStringMap(ImmutableMap.of("DORIS.USER", "option-secret")),
                     ImmutableMap.of(DorisConnectorConstants.GRAVITINO_DORIS_FE_NODES, "fe:8030")));
-    assertTrue(optionFailure.getMessage().contains("doris.user"));
+    assertTrue(optionFailure.getMessage().contains("protected Doris connector options"));
     assertFalse(optionFailure.getMessage().contains("option-secret"));
 
     IllegalArgumentException bypassFailure =
@@ -210,7 +210,7 @@ public class TestDorisPropertiesConverter {
                         "fe:8030",
                         PropertiesConverter.SPARK_PROPERTY_PREFIX + "doris.password",
                         "bypass-secret")));
-    assertTrue(bypassFailure.getMessage().contains("doris.password"));
+    assertTrue(bypassFailure.getMessage().contains("protected Doris connector options"));
     assertFalse(bypassFailure.getMessage().contains("bypass-secret"));
   }
 
@@ -231,7 +231,8 @@ public class TestDorisPropertiesConverter {
                   converter.toSparkCatalogProperties(
                       new CaseInsensitiveStringMap(ImmutableMap.of(property, secret)),
                       validEndpoints()));
-      assertTrue(optionFailure.getMessage().contains(property));
+      assertTrue(optionFailure.getMessage().contains("protected Doris connector options"));
+      assertFalse(optionFailure.getMessage().contains(property));
       assertFalse(optionFailure.getMessage().contains(secret));
 
       IllegalArgumentException bypassFailure =
@@ -244,7 +245,8 @@ public class TestDorisPropertiesConverter {
                           .putAll(validEndpoints())
                           .put(PropertiesConverter.SPARK_PROPERTY_PREFIX + property, secret)
                           .build()));
-      assertTrue(bypassFailure.getMessage().contains(property));
+      assertTrue(bypassFailure.getMessage().contains("protected Doris connector options"));
+      assertFalse(bypassFailure.getMessage().contains(property));
       assertFalse(bypassFailure.getMessage().contains(secret));
     }
   }
@@ -283,6 +285,26 @@ public class TestDorisPropertiesConverter {
         () ->
             converter.toSparkCatalogProperties(
                 new CaseInsensitiveStringMap(ImmutableMap.of()), duplicateBypass));
+  }
+
+  @Test
+  void testRejectedOptionsDoNotDiscloseUserControlledNames() {
+    for (String key :
+        new String[] {
+          "secret-canary",
+          "doris.secret-canary",
+          "DORIS.SECRET-CANARY",
+          "doris_request_secret-canary"
+        }) {
+      IllegalArgumentException failure =
+          assertThrows(
+              IllegalArgumentException.class,
+              () ->
+                  converter.toSparkCatalogProperties(
+                      new CaseInsensitiveStringMap(ImmutableMap.of(key, "value-secret-canary")),
+                      validEndpoints()));
+      assertFalse(failure.getMessage().contains("secret-canary"));
+    }
   }
 
   @Test

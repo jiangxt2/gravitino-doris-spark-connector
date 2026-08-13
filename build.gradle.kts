@@ -13,11 +13,14 @@
  */
 
 import com.diffplug.gradle.spotless.SpotlessExtension
+import net.ltgt.gradle.errorprone.errorprone
 import org.gradle.api.artifacts.component.ModuleComponentIdentifier
 import org.gradle.api.tasks.testing.logging.TestExceptionFormat
 
 plugins {
   base
+  alias(libs.plugins.rat)
+  alias(libs.plugins.errorprone) apply false
   alias(libs.plugins.spotless) apply false
 }
 
@@ -56,6 +59,7 @@ subprojects {
   if (name != "distribution") {
     apply(plugin = "java-library")
     apply(plugin = "com.diffplug.spotless")
+    apply(plugin = "net.ltgt.errorprone")
 
     extensions.configure<JavaPluginExtension> {
       toolchain { languageVersion.set(JavaLanguageVersion.of(17)) }
@@ -80,6 +84,7 @@ subprojects {
     }
 
     dependencies {
+      "errorprone"(dependencyCatalog.errorprone.core)
       "testImplementation"(platform(dependencyCatalog.junit.bom))
       "testImplementation"(dependencyCatalog.junit.jupiter)
       "testImplementation"(dependencyCatalog.assertj.core)
@@ -98,8 +103,39 @@ subprojects {
     tasks.withType<JavaCompile>().configureEach {
       options.encoding = "UTF-8"
       options.compilerArgs.addAll(listOf("-Xlint:all", "-Werror"))
+      options.errorprone.isEnabled.set(true)
+      options.errorprone.disableWarningsInGeneratedCode.set(true)
     }
   }
+}
+
+tasks.rat {
+  approvedLicense("Apache License Version 2.0")
+  inputDir.set(project.rootDir)
+
+  val exclusions =
+      mutableListOf(
+          ".git",
+          ".gitattributes",
+          ".gitignore",
+          "**/*.md",
+          "LICENSE",
+          "NOTICE",
+          "distribution/gradle.lockfile",
+          "gradle/verification-metadata.xml",
+          "gradle/wrapper/gradle-wrapper.jar",
+          "gradle/wrapper/gradle-wrapper.properties",
+          "server-provider-1.3/src/main/resources/META-INF/services/org.apache.gravitino.CatalogProvider")
+  val gitIgnore = project.file(".gitignore")
+  if (gitIgnore.exists()) {
+    // Keep generated and local-only files aligned with .gitignore. Review new ignore patterns to
+    // ensure that they do not broaden RAT exclusions beyond those file classes.
+    exclusions.addAll(
+        gitIgnore.readLines().filter { line -> line.isNotEmpty() && !line.startsWith("#") })
+  }
+  verbose.set(true)
+  failOnError.set(true)
+  setExcludes(exclusions)
 }
 
 val verifySparkDependencyVersions by tasks.registering {
@@ -148,7 +184,13 @@ val verifySparkDependencyVersions by tasks.registering {
 }
 
 tasks.named(LifecycleBasePlugin.CHECK_TASK_NAME) {
-  dependsOn(verifySparkDependencyVersions, ":distribution:verifyDistributionDependencyContract")
+  dependsOn(
+      tasks.rat,
+      subprojects.mapNotNull { project ->
+        project.tasks.findByName(LifecycleBasePlugin.CHECK_TASK_NAME)
+      },
+      verifySparkDependencyVersions,
+      ":distribution:verifyDistributionDependencyContract")
 }
 
 tasks.register("integrationTest") {

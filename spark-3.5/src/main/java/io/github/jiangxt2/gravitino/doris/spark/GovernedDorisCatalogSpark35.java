@@ -128,7 +128,7 @@ public class GovernedDorisCatalogSpark35 extends GovernedDorisCatalog {
    * from early Spark 3.5 patch releases. The raw {@link Set} keeps the erased method descriptor
    * used by later patches while allowing this adapter to compile and load across Spark 3.5.x.
    */
-  @SuppressWarnings("rawtypes")
+  @SuppressWarnings({"rawtypes", "MissingOverride"})
   public Table loadTable(Identifier ident, Set writePrivileges) throws NoSuchTableException {
     if (!getCapabilityPolicy().allowsTableWrites()) {
       throw getCapabilityPolicy().reject("table writes");

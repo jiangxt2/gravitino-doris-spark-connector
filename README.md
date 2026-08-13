@@ -36,8 +36,8 @@ Connector's tablet reader and it inherits JDBC metadata limitations for Doris-sp
 connector adds:
 
 - a `SELECT_TABLE` authorization check before native table loading or JDBC table materialization;
-- fail-closed JDBC URL, driver, Connector/J parameter, and DBCP configuration validation on both
-  the Gravitino server and Spark sides;
+- fail-closed, channel-specific JDBC URL, `connectionProperties`, and DBCP allow-lists on both the
+  Gravitino server and Spark sides;
 - an explicit `strict-jdbc-tls` profile that verifies CA and hostname on one JDBC-only transport;
 - vended JDBC credentials applied after all user-controlled options;
 - native, parallel Doris tablet reads for lossless detail scans;

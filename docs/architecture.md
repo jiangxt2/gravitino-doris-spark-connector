@@ -92,12 +92,14 @@ creating the official Doris catalog or vending credentials, and `DorisJdbcConnec
 the same check when SQL-lane connection material is formed.
 
 The contract is deliberately narrower than Connector/J's complete URL grammar: exact current
-driver class, one ordinary host and explicit port, optional single database, and structured query
-parameters. It rejects embedded credentials, complex host forms, known dangerous Connector/J
-names, DBCP class-loading/identity/eager-init/SQL-execution/exposure keys, encoded key variants, and
-smuggling through `connectionProperties`. The DBCP string is parsed once, matching its runtime
-consumption; nested `connectionProperties` is rejected instead of recursively reinterpreted.
-Failures use fixed messages and never include raw connection material.
+driver class, one ordinary host and explicit port, optional single database, and a separate
+immutable allow-list for every parameter channel. URL and `connectionProperties` accept only the
+reviewed connection timeouts; DBCP bypass accepts those timeouts, `maxIdle`, and one controlled
+`connectionProperties` value. Strict transport adds only its two canonical TLS controls to the
+URL. Unknown names fail closed, while ordinary Gravitino catalog metadata is not misclassified as
+driver input. The DBCP string is parsed once, matching its runtime consumption; nested
+`connectionProperties` is rejected instead of recursively reinterpreted. Failures use fixed
+messages and never include user-controlled names, values, or raw connection material.
 
 The strict profile adds a second structural catalog factory: it creates Spark's JDBC-only catalog,
 loads the physical snapshot over the verified JDBC connection only after authorization, and seeds
@@ -169,23 +171,27 @@ in [Testing](testing.md#type-contract-evidence).
 
 Gravitino 1.3 obtains Doris logical types through JDBC metadata, which can erase complex
 containers, report LARGEINT as INTEGER, and report sketch, VARIANT, or IP types through lossy or
-generic metadata. The FE type is authoritative only for the matrix-listed lossy mappings. Generic
-`UNKNOWN`/`OTHER` cannot authorize an arbitrary type: it is accepted only when the FE type belongs
-to a matrix-listed lossy family such as ARRAY/MAP/STRUCT, LARGEINT, sketch, JSON/JSONB, VARIANT, or
-IP. An unlisted future FE type fails closed. Column count, order, case-insensitive name, and
-nullability remain strict. Lossless scalars and normalized families whose JDBC identity is stable
-retain directional type checks. The adapter does not rely on a private or synthetic table marker
-property.
+generic metadata. The FE type is authoritative only for evidence-backed pairs: ARRAY, MAP, STRUCT,
+and LARGEINT with their observed signed-integer placeholders; BITMAP with its observed external BIT
+placeholder; and HLL with its observed external `UNKNOWN`/`OTHER` placeholder. For other FE
+families, generic `UNKNOWN`/`OTHER` metadata is accepted only for the separately verified
+JSON/JSONB, VARIANT, and IP families. An unlisted pair or future FE type fails closed. DATETIME
+consumes the full type string, enforces the 0..6 precision range, and compares an explicitly
+governed precision; external decimals require a complete family/precision/scale signature;
+unsigned integers require the same base width. Column count, order, case-insensitive name, and
+nullability remain strict. Lossless scalars retain directional type checks. The adapter does not
+rely on a private or synthetic table marker property.
 
 The strict profile never consults FE metadata. It is certified separately for the JDBC-lossless
 scalar schemas in the strict IT matrix; it does not inherit the FE-authoritative normalization
 contract for the JDBC-lossy families above.
 
 The compatibility overload without FE type names is a conservative legacy path, not a production
-type-identity source. It permits lossless scalars plus timestamp and binary normalization that can
-be proven from the logical and Catalyst types alone. External, generic, unsigned, complex, sketch,
-and future types fail closed on that path and cannot be promoted into the two-version support
-matrix.
+type-identity source. It permits lossless scalars plus an unspecified-precision timestamp and
+binary normalization that can be proven from the logical and Catalyst types alone. An explicitly
+governed timestamp precision cannot be checked without the FE type name and fails closed. External,
+generic, unsigned, complex, sketch, and future types also fail closed on that path and cannot be
+promoted into the two-version support matrix.
 
 The per-catalog physical-schema cache is bounded by size and TTL. One successful authorized table
 load uses one immutable pair of Catalyst fields and physical type names for compatibility

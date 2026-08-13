@@ -15,7 +15,7 @@
 package io.github.jiangxt2.gravitino.doris.it;
 
 import static java.lang.String.format;
-import static org.testcontainers.shaded.org.awaitility.Awaitility.await;
+import static org.awaitility.Awaitility.await;
 
 import java.io.File;
 import java.io.IOException;

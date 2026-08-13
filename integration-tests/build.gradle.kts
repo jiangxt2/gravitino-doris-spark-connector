@@ -41,6 +41,7 @@ dependencies {
   externalTestJdbcDriver(libs.mysql.driver) { isTransitive = false }
   testImplementation(project(":spark-3.5"))
   testImplementation(project(":server-provider-1.3"))
+  testImplementation(libs.awaitility)
   testImplementation(libs.gravitino.spark.runtime35)
   testImplementation(libs.gravitino.client)
   testRuntimeOnly(libs.gravitino.client.runtime)

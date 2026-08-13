@@ -15,6 +15,7 @@
 package io.github.jiangxt2.gravitino.doris.spark;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -23,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.google.common.collect.ImmutableMap;
 import org.apache.doris.spark.config.DorisConfig;
+import org.apache.doris.spark.rest.models.Field;
 import org.apache.spark.sql.connector.catalog.Identifier;
 import org.apache.spark.sql.connector.catalog.Table;
 import org.apache.spark.sql.types.DataTypes;
@@ -100,6 +102,37 @@ public class TestSchemaSeededDorisTableCatalog35 {
         SchemaSeededDorisTableCatalog35.toCatalystTypeOrString("DECIMAL256", 76, 6));
     assertSame(
         DataTypes.IntegerType, SchemaSeededDorisTableCatalog35.toCatalystTypeOrString("INT", 0, 0));
+    assertThrows(
+        NullPointerException.class,
+        () -> SchemaSeededDorisTableCatalog35.toCatalystTypeOrString(null, 0, 0));
+  }
+
+  @Test
+  void testKnownPhysicalTypeConversionFailureDoesNotUseStringFallback() {
+    assertThrows(
+        ArithmeticException.class,
+        () -> SchemaSeededDorisTableCatalog35.toCatalystTypeOrString("DECIMAL", 39, 0));
+    IllegalArgumentException failure =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> SchemaSeededDorisTableCatalog35.toCatalystTypeOrString("DECIMAL", 3, 4));
+    assertEquals("Failed to convert Doris FE type", failure.getMessage());
+  }
+
+  @Test
+  void testRetainsFeTypeParametersNeededForCompatibilityChecks() {
+    assertEquals(
+        "DATETIMEV2",
+        SchemaSeededDorisTableCatalog35.typeNameWithParameters(
+            new Field("event_time", "DATETIMEV2", "", 6, 0, "")));
+    assertEquals(
+        "DECIMAL256(76,6)",
+        SchemaSeededDorisTableCatalog35.typeNameWithParameters(
+            new Field("amount", "DECIMAL256", "", 76, 6, "")));
+    assertEquals(
+        "DATETIME(3)",
+        SchemaSeededDorisTableCatalog35.typeNameWithParameters(
+            new Field("event_time", "DATETIME(3)", "", 0, 0, "")));
   }
 
   private static SchemaSeededDorisTableCatalog35 initializedCatalog() {

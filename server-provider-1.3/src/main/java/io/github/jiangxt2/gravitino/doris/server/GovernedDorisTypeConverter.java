@@ -15,12 +15,17 @@
 package io.github.jiangxt2.gravitino.doris.server;
 
 import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.apache.gravitino.catalog.jdbc.converter.JdbcTypeConverter;
 import org.apache.gravitino.rel.types.Type;
 import org.apache.gravitino.rel.types.Types;
 
 /** Type converter for Apache Doris. */
 public class GovernedDorisTypeConverter extends JdbcTypeConverter {
+  private static final int MAX_DATETIME_PRECISION = 6;
+  private static final Pattern DATETIME_PATTERN =
+      Pattern.compile("^(datetime|datetimev2)(?:\\(\\s*(\\d+)\\s*\\))?$");
   static final String BOOLEAN = "boolean";
   static final String TINYINT = "tinyint";
   static final String SMALLINT = "smallint";
@@ -65,21 +70,8 @@ public class GovernedDorisTypeConverter extends JdbcTypeConverter {
       baseType = typeName.substring(0, parenIndex);
     }
 
-    // Handle datetime(N) format — parse precision from type string when not in typeBean
     if (DATETIME.equals(baseType) || DATETIMEV2.equals(baseType)) {
-      if (typeBean.getDatetimePrecision() != null) {
-        return Types.TimestampType.withoutTimeZone(typeBean.getDatetimePrecision());
-      }
-      if (parenIndex > 0 && typeName.endsWith(")")) {
-        try {
-          String precisionStr = typeName.substring(parenIndex + 1, typeName.length() - 1);
-          int precision = Integer.parseInt(precisionStr);
-          return Types.TimestampType.withoutTimeZone(precision);
-        } catch (NumberFormatException e) {
-          // Fall through to default datetime handling
-        }
-      }
-      return Types.TimestampType.withoutTimeZone();
+      return parseDatetimeOrExternal(typeName, typeBean.getDatetimePrecision());
     }
 
     switch (baseType) {
@@ -140,24 +132,48 @@ public class GovernedDorisTypeConverter extends JdbcTypeConverter {
   /**
    * Parse type parameters from the type string or typeBean values. For DECIMAL with precision up to
    * 38, returns DecimalType(p1, p2); wider decimals remain ExternalType. For CHAR/VARCHAR, returns
-   * FixedCharType/VarCharType with default fallback. Returns ExternalType if the type string is
-   * malformed and cannot be parsed.
+   * FixedCharType/VarCharType when their required length is present and valid. Returns ExternalType
+   * if the type string is malformed or its required parameters cannot be proven.
    */
   private static Type parseTypeParamsOrExternal(
       String typeName, int parenIndex, Integer beanParam1, Integer beanParam2) {
-    int p1 = beanParam1 != null ? beanParam1 : 0;
-    int p2 = beanParam2 != null ? beanParam2 : 0;
-    if (p1 == 0 && parenIndex > 0 && typeName.endsWith(")")) {
+    String baseType = parenIndex > 0 ? typeName.substring(0, parenIndex) : typeName;
+    boolean decimalType = isDecimalType(baseType);
+    int expectedParameterCount = decimalType ? 2 : 1;
+    Integer stringParam1 = null;
+    Integer stringParam2 = null;
+    if (parenIndex > 0) {
+      if (!typeName.endsWith(")")) {
+        return Types.ExternalType.of(typeName);
+      }
+      String[] parts = typeName.substring(parenIndex + 1, typeName.length() - 1).split(",", -1);
+      if (parts.length != expectedParameterCount) {
+        return Types.ExternalType.of(typeName);
+      }
       try {
-        String[] parts = typeName.substring(parenIndex + 1, typeName.length() - 1).split(",");
-        p1 = Integer.parseInt(parts[0].trim());
-        p2 = parts.length >= 2 ? Integer.parseInt(parts[1].trim()) : 0;
+        stringParam1 = Integer.parseInt(parts[0].trim());
+        if (decimalType) {
+          stringParam2 = Integer.parseInt(parts[1].trim());
+        }
       } catch (NumberFormatException e) {
         return Types.ExternalType.of(typeName);
       }
+    } else if (typeName.indexOf(')') >= 0) {
+      return Types.ExternalType.of(typeName);
     }
 
-    String baseType = parenIndex > 0 ? typeName.substring(0, parenIndex) : typeName;
+    if (stringParam1 != null && beanParam1 != null && !stringParam1.equals(beanParam1)) {
+      return Types.ExternalType.of(typeName);
+    }
+    if (decimalType
+        && stringParam2 != null
+        && beanParam2 != null
+        && !stringParam2.equals(beanParam2)) {
+      return Types.ExternalType.of(typeName);
+    }
+
+    Integer p1 = stringParam1 != null ? stringParam1 : beanParam1;
+    Integer p2 = stringParam2 != null ? stringParam2 : beanParam2;
     switch (baseType) {
       case DECIMAL:
       case DECIMALV2:
@@ -167,24 +183,66 @@ public class GovernedDorisTypeConverter extends JdbcTypeConverter {
       case DECIMAL256:
         // Gravitino DecimalType follows Spark's precision limit of 38. Preserve wider Doris
         // decimals as an ExternalType so execution adapters can expose them without truncation.
-        if (p1 < 1 || p2 < 0 || p2 > p1) {
+        if (p1 == null || p2 == null || p1 < 1 || p2 < 0 || p2 > p1) {
           return Types.ExternalType.of(typeName);
         }
         if (p1 > 38) {
-          return Types.ExternalType.of(String.format("%s(%d,%d)", baseType, p1, p2));
+          return Types.ExternalType.of(String.format(Locale.ROOT, "%s(%d,%d)", baseType, p1, p2));
         }
         return Types.DecimalType.of(p1, p2);
       case CHAR:
-        // 1 = minimum valid length for CHAR; fallback when JDBC metadata and type string
-        // both lack length info (unlikely in practice)
-        return Types.FixedCharType.of(p1 > 0 ? p1 : 1);
+        return p1 != null && p1 > 0 && p1 <= 255
+            ? Types.FixedCharType.of(p1)
+            : Types.ExternalType.of(typeName);
       case VARCHAR:
-        // 255 = MySQL/Doris legacy default for VARCHAR; fallback when JDBC metadata and
-        // type string both lack length info (unlikely in practice)
-        return Types.VarCharType.of(p1 > 0 ? p1 : 255);
+        return p1 != null && p1 > 0 && p1 <= 65533
+            ? Types.VarCharType.of(p1)
+            : Types.ExternalType.of(typeName);
       default:
         return Types.ExternalType.of(typeName);
     }
+  }
+
+  private static Type parseDatetimeOrExternal(String typeName, Integer beanPrecision) {
+    Matcher matcher = DATETIME_PATTERN.matcher(typeName);
+    if (!matcher.matches()) {
+      return Types.ExternalType.of(typeName);
+    }
+
+    Integer stringPrecision = null;
+    if (matcher.group(2) != null) {
+      try {
+        stringPrecision = Integer.valueOf(matcher.group(2));
+      } catch (NumberFormatException e) {
+        return Types.ExternalType.of(typeName);
+      }
+    }
+    if (stringPrecision != null
+        && beanPrecision != null
+        && !stringPrecision.equals(beanPrecision)) {
+      return Types.ExternalType.of(typeName);
+    }
+
+    Integer precision = stringPrecision != null ? stringPrecision : beanPrecision;
+    if (precision == null) {
+      return Types.TimestampType.withoutTimeZone();
+    }
+    if (precision < 0 || precision > MAX_DATETIME_PRECISION) {
+      return Types.ExternalType.of(
+          stringPrecision != null
+              ? typeName
+              : String.format(Locale.ROOT, "%s(%d)", matcher.group(1), precision));
+    }
+    return Types.TimestampType.withoutTimeZone(precision);
+  }
+
+  private static boolean isDecimalType(String baseType) {
+    return DECIMAL.equals(baseType)
+        || DECIMALV2.equals(baseType)
+        || DECIMAL32.equals(baseType)
+        || DECIMAL64.equals(baseType)
+        || DECIMAL128.equals(baseType)
+        || DECIMAL256.equals(baseType);
   }
 
   @Override
@@ -214,8 +272,15 @@ public class GovernedDorisTypeConverter extends JdbcTypeConverter {
       return DATEV2;
     } else if (type instanceof Types.TimestampType) {
       Types.TimestampType timestampType = (Types.TimestampType) type;
+      if (timestampType.hasTimeZone()
+          || (timestampType.hasPrecisionSet()
+              && (timestampType.precision() < 0
+                  || timestampType.precision() > MAX_DATETIME_PRECISION))) {
+        throw new IllegalArgumentException(
+            "Doris DATETIME requires a timestamp without time zone and precision 0 to 6");
+      }
       return timestampType.hasPrecisionSet()
-          ? String.format("%s(%d)", DATETIME, timestampType.precision())
+          ? String.format(Locale.ROOT, "%s(%d)", DATETIME, timestampType.precision())
           : DATETIME;
     } else if (type instanceof Types.VarCharType) {
       int length = ((Types.VarCharType) type).length();

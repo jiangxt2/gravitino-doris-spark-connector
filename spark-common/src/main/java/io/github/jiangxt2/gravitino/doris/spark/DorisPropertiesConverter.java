@@ -213,29 +213,26 @@ public class DorisPropertiesConverter implements PropertiesConverter {
     input.forEach(
         (key, value) -> {
           if (key == null) {
-            throw new IllegalArgumentException(source + " contain a null option key");
+            throw new IllegalArgumentException(source + " contains a null option key");
           }
 
           String canonicalKey = key.toLowerCase(Locale.ROOT);
           if (!seen.add(canonicalKey)) {
-            throw new IllegalArgumentException(
-                source + " contain duplicate option " + canonicalKey);
+            throw new IllegalArgumentException(source + " contains a duplicate Doris read option");
           }
           if (PROTECTED_CONNECTOR_PROPERTIES.contains(canonicalKey)) {
             throw new IllegalArgumentException(
-                source + " must not override protected option " + canonicalKey);
+                source + " must not override protected Doris connector options");
           }
           if (!canonicalKey.startsWith("doris.")) {
-            throw new IllegalArgumentException(
-                source + " must use canonical doris.* option names: " + key);
+            throw new IllegalArgumentException(source + " must use canonical doris.* option names");
           }
           if (!ALLOWED_CONNECTOR_PROPERTIES.contains(canonicalKey)) {
             throw new IllegalArgumentException(
-                source + " contain unsupported Doris read option " + canonicalKey);
+                source + " contains an unsupported Doris read option");
           }
           if (isBlank(value)) {
-            throw new IllegalArgumentException(
-                source + " contain a blank value for option " + canonicalKey);
+            throw new IllegalArgumentException(source + " contains a blank Doris read option");
           }
           result.put(canonicalKey, value);
         });

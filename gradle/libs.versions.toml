@@ -1,7 +1,22 @@
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 [versions]
 assertj = "3.26.3"
+awaitility = "4.2.1"
 caffeine = "2.9.3"
 dorisConnector = "26.0.0"
+errorProne = "2.10.0"
+errorPronePlugin = "3.1.0"
 googleJavaFormat = "1.22.0"
 gravitino = "1.3.0"
 guava = "32.1.3-jre"
@@ -12,11 +27,14 @@ scala = "2.12.18"
 spark = "3.5.8"
 spotless = "6.25.0"
 testcontainers = "1.21.4"
+ratPlugin = "0.8.0"
 
 [libraries]
 assertj-core = { module = "org.assertj:assertj-core", version.ref = "assertj" }
+awaitility = { module = "org.awaitility:awaitility", version.ref = "awaitility" }
 caffeine = { module = "com.github.ben-manes.caffeine:caffeine", version.ref = "caffeine" }
 doris-spark-connector = { module = "org.apache.doris:spark-doris-connector-spark-3.5", version.ref = "dorisConnector" }
+errorprone-core = { module = "com.google.errorprone:error_prone_core", version.ref = "errorProne" }
 gravitino-api = { module = "org.apache.gravitino:gravitino-api", version.ref = "gravitino" }
 gravitino-catalog-common = { module = "org.apache.gravitino:gravitino-catalog-common", version.ref = "gravitino" }
 gravitino-catalog-jdbc-common = { module = "org.apache.gravitino:gravitino-catalog-jdbc-common", version.ref = "gravitino" }
@@ -44,4 +62,6 @@ testcontainers = { module = "org.testcontainers:testcontainers", version.ref = "
 testcontainers-junit = { module = "org.testcontainers:junit-jupiter", version.ref = "testcontainers" }
 
 [plugins]
+errorprone = { id = "net.ltgt.errorprone", version.ref = "errorPronePlugin" }
+rat = { id = "org.nosphere.apache.rat", version.ref = "ratPlugin" }
 spotless = { id = "com.diffplug.spotless", version.ref = "spotless" }

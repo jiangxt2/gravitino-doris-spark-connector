@@ -1,8 +1,8 @@
 # Gravitino Doris Spark Connector
 
-A standalone, governed Apache Doris reader for Apache Spark and Apache Gravitino. It combines
-Gravitino authorization and credential vending with the official Apache Doris Spark Connector and
-Spark's JDBC V2 planner.
+A standalone, governed Apache Doris batch connector for Apache Spark and Apache Gravitino. It
+combines Gravitino authorization and credential vending with the official Apache Doris Spark
+Connector and Spark's JDBC V2 planner.
 
 The project is independent of the Apache Gravitino source tree. It depends only on published Maven
 Central artifacts and does not patch or shadow `org.apache.gravitino` classes.
@@ -12,7 +12,7 @@ Central artifacts and does not patch or shadow `org.apache.gravitino` classes.
 | Component | Supported version |
 | --- | --- |
 | Apache Gravitino client/server | 1.3.0 |
-| Apache Spark | 3.5.x; release-certified on 3.5.8 |
+| Apache Spark | reads on 3.5.x; batch writes on 3.5.3+; release-certified on 3.5.8 |
 | Scala | 2.12 |
 | Apache Doris Spark Connector | 26.0.0 |
 | Apache Doris | 3.0.6.2 and 4.0.6 |
@@ -23,11 +23,10 @@ integration matrix. Spark 3.5.0 and 3.5.9 run compile, unit, class-loading, inte
 compilation, and distribution compatibility smoke tests. Those boundary smokes do not constitute
 full Doris integration certification for every Spark 3.5 patch.
 
-The initial release supports governed batch reads of Doris tables. Gravitino views, Spark writes,
-streaming writes, and Spark DDL are deliberately rejected. The facade already contains
-policy-gated write and mutation entry points, so later implementations replace delegates and
-capabilities without replacing the catalog, table facade, plugin, authorization order, or
-credential boundary.
+The connector supports governed batch reads and opt-in batch append on Spark 3.5.3 or newer.
+Spark 3.5.0 through 3.5.2 remain read-only. Batch write, Arrow Flight SQL, and truncate overwrite
+are all disabled by default. Gravitino views, streaming writes, predicate/dynamic overwrite, Spark
+DDL, CTAS, UPDATE, DELETE, and MERGE are deliberately rejected.
 
 ## Why this exists
 
@@ -41,12 +40,16 @@ connector adds:
 - an explicit `strict-jdbc-tls` profile that verifies CA and hostname on one JDBC-only transport;
 - vended JDBC credentials applied after all user-controlled options;
 - native, parallel Doris tablet reads for lossless detail scans;
+- an experimental, catalog-managed Arrow Flight SQL mode with safe first-row fallback to the same
+  partition's Thrift reader and an application-scoped fail-sticky circuit;
 - aggregate, Top-N, limit, and offset pushdown through Spark's own JDBC V2 planner;
 - the same JDBC partition tuple and fetch-size controls as a direct Spark JDBC read;
 - stable String/base64 semantics for the explicitly verified DATETIME, complex, JSON, VARIANT,
   IP, LARGEINT, sketch, and Doris 4 wide-decimal types;
 - bounded physical-schema caching with precise invalidation and one safe stale-hit revalidation;
-- a read-only capability facade that prevents write-capability leakage from the native delegate.
+- a capability facade that exposes only certified batch read/write operations;
+- opt-in batch append through the official Doris Stream Load writer with forced 2PC, strict mode,
+  zero filter tolerance, schemaless disabled, and automatic redirect disabled.
 
 See [Architecture](docs/architecture.md) for the execution and trust boundaries, and
 [Migration from JDBC](docs/migration-from-jdbc.md) for a direct comparison.
@@ -105,6 +108,9 @@ doris-read-transport=hybrid
 doris-fenodes=doris-fe:8030
 doris-query-port=9030
 credential-providers=jdbc-user-password
+doris-arrow-flight-sql-mode=disabled
+doris-write-mode=disabled
+doris-write-overwrite-mode=reject
 doris-schema-cache-ttl-ms=30000
 doris-schema-cache-max-entries=1000
 ```
@@ -180,6 +186,39 @@ SELECT * FROM orders;
 Two-part access without a current schema fails with an actionable error; the official Doris
 catalog has no reliable default namespace.
 
+## Optional Arrow and batch write
+
+Arrow Flight SQL is experimental and remains off unless the server-managed catalog sets both:
+
+```properties
+doris-arrow-flight-sql-mode=preferred
+doris-arrow-flight-sql-port=8070
+```
+
+The port cannot be supplied or overridden through Spark options. The adapter fixes official FE
+auto-discovery to `false`, probes the catalog-managed endpoint with a bounded connect timeout, and
+falls back to the same partition's Thrift reader only for classified transport failures before any
+row is delivered. Once one such failure opens the hashed application/endpoint circuit, later
+partitions in that Spark application bypass Arrow. The circuit intentionally does not reset in a
+long-lived session; start a new Spark application to retry a recovered endpoint. Arrow uses the
+official connector's insecure gRPC location and is therefore incompatible with
+`strict-jdbc-tls`.
+
+Enable governed batch append on Spark 3.5.3 or newer with:
+
+```properties
+doris-write-mode=batch
+doris-write-overwrite-mode=reject
+```
+
+The Spark principal needs Gravitino `MODIFY_TABLE`; the Doris technical user needs the data-plane
+privileges required by Stream Load. The connector forces the reviewed Stream Load parameters and
+does not claim one job-wide atomic transaction across all writer partitions. `append()` is the
+default supported operation. Setting `doris-write-overwrite-mode=truncate` additionally permits
+only Spark's full-table truncate overwrite. The official connector first issues Doris SQL
+`TRUNCATE TABLE` and then starts the load, so a later load failure can leave the table empty or
+partially loaded.
+
 ## Type behavior
 
 In the compatible `hybrid` profile, lossless scalar values retain Catalyst types. Doris
@@ -200,6 +239,13 @@ The strict profile never falls back to FE metadata. Its physical schema comes ex
 JDBC `DatabaseMetaData`; the release IT exercises the lossless scalar tables used by strict reads.
 The FE-aware Doris-specific normalization matrix above remains a `hybrid` contract until each lossy
 family has an independent JDBC-only schema/value fixture.
+
+Writes require exact column count, order, case-sensitive names, safe nullability, and the certified
+lossless Catalyst type. Normalized types remain read-only except Doris DATETIME. DATETIME accepts
+the exact precision-specific String grammar `yyyy-MM-dd HH:mm:ss[.fraction]` for precision 0..6;
+Spark Timestamp inputs follow Spark's standard assignment cast using the write-analysis
+`spark.sql.session.timeZone` before the same row validation. Both paths are round-trip tested on
+the two certified Doris versions.
 
 ## Build and test
 
@@ -230,6 +276,17 @@ Real-infrastructure tests run embedded Spark 3.5.8 plus Docker-managed Gravitino
 ./gradlew integrationTest -PdorisVersion=3.0.6.2
 ./gradlew integrationTest -PdorisVersion=4.0.6
 ```
+
+The opt-in performance harness uses one cluster-mode driver and two executors placed on three
+separate Spark Standalone workers. The default matrix is capped at ten million rows:
+
+```bash
+./gradlew performanceTest -PdorisVersion=4.0.6
+```
+
+It writes an atomic manifest, a redacted Spark-submit log, and Spark event logs under
+`integration-tests/build/performance-results/`. Performance evidence is workload-specific; the
+project does not claim that Arrow or every governed lane is universally faster than JDBC.
 
 On macOS, start `mac-docker-connector` before the Docker tests. The tests use the routed
 `10.20.30.0/28` subnet and apply Docker Engine 28's `nat-unprotected` gateway mode only to that

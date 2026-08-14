@@ -14,6 +14,9 @@
 
 package io.github.jiangxt2.gravitino.doris.spark;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -59,7 +62,7 @@ class SchemaSeededDorisTableCatalog35 extends DorisTableCatalog {
    * @param identifier the authorized Spark table identifier
    * @param readSchema the validated schema and SQL normalization plan
    * @param connectionInfo the credential-vended JDBC connection material
-   * @return a read-only hybrid Doris table
+   * @return a hybrid Doris read table that can be decorated after separate write authorization
    */
   Table loadTable(
       Identifier identifier,
@@ -91,12 +94,50 @@ class SchemaSeededDorisTableCatalog35 extends DorisTableCatalog {
                   connectionInfo.url(),
                   readSchema.tableOrQuery(identifier),
                   jdbcParameters(connectionInfo, readOptions)));
-      return new DorisHybridTable35(nativeTable, sqlTable, identifier, readSchema);
+      String flightPort = catalogOptions.get(DorisConnectorConstants.DORIS_ARROW_FLIGHT_SQL_PORT);
+      boolean arrowPreferred = flightPort != null;
+      return new DorisHybridTable35(
+          nativeTable,
+          sqlTable,
+          identifier,
+          readSchema,
+          tableConfig,
+          arrowPreferred,
+          arrowPreferred ? endpointIdentity(flightPort) : "",
+          arrowPreferred ? frontendHosts() : List.of());
     } catch (OptionRequiredException | RuntimeException e) {
       // Do not retain third-party configuration exception text because the options include the
       // vended credential.
       throw new IllegalArgumentException(
           String.format("Failed to create Doris table configuration for %s", identifier));
+    }
+  }
+
+  private List<String> frontendHosts() {
+    String endpoints = catalogOptions.get(DorisConnectorConstants.DORIS_FE_NODES);
+    DorisChecks.checkState(endpoints != null, "Doris FE endpoints are not configured");
+    List<String> hosts = new ArrayList<>();
+    for (String endpoint : endpoints.split(",", -1)) {
+      int separator = endpoint.lastIndexOf(':');
+      DorisChecks.checkState(separator > 0, "Doris FE endpoint is invalid");
+      hosts.add(endpoint.substring(0, separator));
+    }
+    return List.copyOf(hosts);
+  }
+
+  private String endpointIdentity(String flightPort) {
+    try {
+      MessageDigest digest = MessageDigest.getInstance("SHA-256");
+      String material =
+          catalogOptions.get(DorisConnectorConstants.DORIS_FE_NODES) + '\0' + flightPort;
+      byte[] hashed = digest.digest(material.getBytes(StandardCharsets.UTF_8));
+      StringBuilder encoded = new StringBuilder(hashed.length * 2);
+      for (byte value : hashed) {
+        encoded.append(String.format(Locale.ROOT, "%02x", value & 0xff));
+      }
+      return encoded.toString();
+    } catch (NoSuchAlgorithmException e) {
+      throw new IllegalStateException("SHA-256 is required for Doris endpoint identity", e);
     }
   }
 

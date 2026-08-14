@@ -48,7 +48,9 @@ public class TestDorisPropertiesConverter {
     assertEquals("fe-1:8030,fe-2:8030", result.get("doris.fenodes"));
     assertEquals("9030", result.get("doris.query.port"));
     assertEquals("2", result.get("doris.request.retries"));
-    assertEquals(3, result.size());
+    assertEquals("thrift", result.get("doris.read.mode"));
+    assertEquals("false", result.get("doris.fe.auto.fetch"));
+    assertEquals(5, result.size());
   }
 
   @Test
@@ -65,7 +67,65 @@ public class TestDorisPropertiesConverter {
                 "unrelated-property",
                 "value"));
 
-    assertEquals(ImmutableMap.of("doris.fenodes", "fe:8030"), result);
+    assertEquals("fe:8030", result.get("doris.fenodes"));
+    assertEquals("thrift", result.get("doris.read.mode"));
+    assertEquals("false", result.get("doris.fe.auto.fetch"));
+    assertEquals(3, result.size());
+  }
+
+  @Test
+  void testMapsManagedArrowAndForcesSafeWriteOptions() {
+    Map<String, String> result =
+        converter.toSparkCatalogProperties(
+            ImmutableMap.<String, String>builder()
+                .putAll(validEndpoints())
+                .put(DorisConnectorConstants.ARROW_FLIGHT_SQL_MODE, "preferred")
+                .put(DorisConnectorConstants.ARROW_FLIGHT_SQL_PORT, "8070")
+                .put(DorisConnectorConstants.WRITE_MODE, "batch")
+                .build());
+
+    assertEquals("8070", result.get("doris.read.arrow-flight-sql.port"));
+    assertEquals("thrift", result.get("doris.read.mode"));
+    assertEquals("false", result.get("doris.fe.auto.fetch"));
+    assertEquals("stream_load", result.get("doris.sink.mode"));
+    assertEquals("false", result.get("doris.sink.auto-redirect"));
+    assertEquals("true", result.get("doris.sink.enable-2pc"));
+    assertEquals("true", result.get("doris.sink.properties.strict_mode"));
+    assertEquals("0", result.get("doris.max.filter.ratio"));
+    assertEquals("false", result.get("doris.write.schemaless"));
+  }
+
+  @Test
+  void testRejectsArrowCombinationsAndRawManagedOptions() {
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            converter.toSparkCatalogProperties(
+                ImmutableMap.<String, String>builder()
+                    .putAll(validEndpoints())
+                    .put(DorisConnectorConstants.ARROW_FLIGHT_SQL_PORT, "8070")
+                    .build()));
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            converter.toSparkCatalogProperties(
+                ImmutableMap.<String, String>builder()
+                    .putAll(validEndpoints())
+                    .put(DorisConnectorConstants.ARROW_FLIGHT_SQL_MODE, "preferred")
+                    .build()));
+
+    for (String option :
+        new String[] {
+          "doris.read.mode",
+          "doris.read.arrow-flight-sql.port",
+          "doris.fe.auto.fetch",
+          "doris.sink.enable-2pc",
+          "doris.sink.auto-redirect",
+          "doris.sink.mode",
+          "doris.sink.properties.format"
+        }) {
+      assertRejectedOption(option, "secret-canary");
+    }
   }
 
   @Test

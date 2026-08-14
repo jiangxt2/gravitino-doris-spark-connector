@@ -14,12 +14,17 @@
 
 package io.github.jiangxt2.gravitino.doris.spark;
 
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.apache.spark.package$;
 import org.apache.spark.util.VersionUtils$;
 import scala.util.Properties$;
 
 /** Resolves the version-specific catalog without silently falling back to generic JDBC. */
 public final class DorisCatalogClassResolver {
+
+  private static final Pattern SPARK_VERSION =
+      Pattern.compile("^(\\d+)\\.(\\d+)\\.(\\d+)(?:[-+].*)?$");
 
   static final String SPARK_35_CATALOG_CLASS =
       "io.github.jiangxt2.gravitino.doris.spark.GovernedDorisCatalogSpark35";
@@ -42,5 +47,21 @@ public final class DorisCatalogClassResolver {
             "The governed Doris connector supports Spark 3.5 with Scala 2.12; found Spark %s "
                 + "with Scala %s",
             sparkVersion, scalaVersion));
+  }
+
+  /** Returns whether the active Spark patch contains the public write-aware catalog API. */
+  public static boolean supportsWriteAwareLoad() {
+    return supportsWriteAwareLoad(package$.MODULE$.SPARK_VERSION());
+  }
+
+  static boolean supportsWriteAwareLoad(String sparkVersion) {
+    Matcher matcher = SPARK_VERSION.matcher(sparkVersion == null ? "" : sparkVersion);
+    if (!matcher.matches()) {
+      return false;
+    }
+    int major = Integer.parseInt(matcher.group(1));
+    int minor = Integer.parseInt(matcher.group(2));
+    int patch = Integer.parseInt(matcher.group(3));
+    return major == 3 && minor == 5 && patch >= 3;
   }
 }

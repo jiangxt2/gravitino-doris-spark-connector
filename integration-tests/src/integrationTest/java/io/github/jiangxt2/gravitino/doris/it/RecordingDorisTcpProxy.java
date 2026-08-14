@@ -37,7 +37,10 @@ final class RecordingDorisTcpProxy implements AutoCloseable {
 
   enum Lane {
     CONTROL("control", 19030),
-    DENIAL("denial", 19031);
+    DENIAL("denial", 19031),
+    FE_HTTP("fe-http", 18030),
+    FLIGHT("flight", 18070),
+    FLIGHT_FAILURE("flight-failure", 18071);
 
     private final String queryValue;
     private final int port;
@@ -75,6 +78,9 @@ final class RecordingDorisTcpProxy implements AutoCloseable {
 
   private static final Logger LOG = LoggerFactory.getLogger(RecordingDorisTcpProxy.class);
   private static final int ADMIN_PORT = 18080;
+  private static final int FE_HTTP_TARGET_PORT = 8030;
+  private static final int FE_FLIGHT_TARGET_PORT = 8070;
+  private static final int FE_QUERY_TARGET_PORT = 9030;
   private static final String IMAGE =
       "apache/gravitino:1.3.0@sha256:4ff340f1160600ecac8126c2a0c4b88ea2178d3f1954966af559bab526485af6";
   private static final String SERVER_CLASS = RecordingDorisTcpProxyServer.class.getName();
@@ -95,15 +101,26 @@ final class RecordingDorisTcpProxy implements AutoCloseable {
                 "/opt/recording-proxy/classes",
                 SERVER_CLASS,
                 "doris-fe",
-                "9030",
+                Integer.toString(FE_QUERY_TARGET_PORT),
+                Integer.toString(FE_HTTP_TARGET_PORT),
+                Integer.toString(FE_FLIGHT_TARGET_PORT),
                 Integer.toString(Lane.CONTROL.port),
                 Integer.toString(Lane.DENIAL.port),
+                Integer.toString(Lane.FE_HTTP.port),
+                Integer.toString(Lane.FLIGHT.port),
+                Integer.toString(Lane.FLIGHT_FAILURE.port),
                 Integer.toString(ADMIN_PORT))
             .withLabel(IntegrationTestContainerLabels.KEY, IntegrationTestContainerLabels.VALUE)
             .withNetworkMode(network.name())
             .withFileSystemBind(
                 classes.toString(), "/opt/recording-proxy/classes", BindMode.READ_ONLY)
-            .withExposedPorts(Lane.CONTROL.port, Lane.DENIAL.port, ADMIN_PORT)
+            .withExposedPorts(
+                Lane.CONTROL.port,
+                Lane.DENIAL.port,
+                Lane.FE_HTTP.port,
+                Lane.FLIGHT.port,
+                Lane.FLIGHT_FAILURE.port,
+                ADMIN_PORT)
             .waitingFor(
                 Wait.forHttp("/health")
                     .forPort(ADMIN_PORT)
@@ -134,7 +151,24 @@ final class RecordingDorisTcpProxy implements AutoCloseable {
     if (proxyAddress == null) {
       throw new IllegalStateException("Doris TCP proxy has not started");
     }
+    if (lane != Lane.CONTROL && lane != Lane.DENIAL) {
+      throw new IllegalArgumentException("The selected TCP proxy lane is not a JDBC lane");
+    }
     return String.format("jdbc:mysql://%s:%d/", proxyAddress, lane.port);
+  }
+
+  String feEndpoint() {
+    if (proxyAddress == null) {
+      throw new IllegalStateException("Doris TCP proxy has not started");
+    }
+    return String.format("%s:%d", proxyAddress, Lane.FE_HTTP.port);
+  }
+
+  int flightPort(Lane lane) {
+    if (lane != Lane.FLIGHT && lane != Lane.FLIGHT_FAILURE) {
+      throw new IllegalArgumentException("The selected TCP proxy lane is not a Flight lane");
+    }
+    return lane.port;
   }
 
   State state(Lane lane) {
@@ -143,6 +177,11 @@ final class RecordingDorisTcpProxy implements AutoCloseable {
 
   State reset(Lane lane) {
     return request("POST", "/reset?lane=" + lane.queryValue);
+  }
+
+  State setFlightFailureAvailable(boolean available) {
+    return request(
+        "POST", "/availability?lane=" + Lane.FLIGHT_FAILURE.queryValue + "&available=" + available);
   }
 
   @Override

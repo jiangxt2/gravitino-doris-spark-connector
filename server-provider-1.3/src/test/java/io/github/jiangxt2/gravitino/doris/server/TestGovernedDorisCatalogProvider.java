@@ -66,6 +66,30 @@ public class TestGovernedDorisCatalogProvider {
                 .getPropertyEntry("doris-read-transport")
                 .isImmutable())
         .isTrue();
+    assertThat(
+            provider
+                .catalogPropertiesMetadata()
+                .getPropertyEntry("doris-arrow-flight-sql-mode")
+                .getDefaultValue())
+        .isEqualTo("disabled");
+    assertThat(
+            provider
+                .catalogPropertiesMetadata()
+                .getPropertyEntry("doris-write-mode")
+                .getDefaultValue())
+        .isEqualTo("disabled");
+    assertThat(
+            provider
+                .catalogPropertiesMetadata()
+                .getPropertyEntry("doris-write-overwrite-mode")
+                .getDefaultValue())
+        .isEqualTo("reject");
+    org.apache.gravitino.connector.PropertyEntry<?> flightPort =
+        provider.catalogPropertiesMetadata().getPropertyEntry("doris-arrow-flight-sql-port");
+    assertThat(flightPort.decode("8070")).isEqualTo(8070);
+    assertThatThrownBy(() -> flightPort.decode("65536"))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("1 and 65535");
   }
 
   @Test

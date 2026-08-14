@@ -35,6 +35,16 @@ public final class DorisJdbcSecurity {
   public static final String STRICT_JDBC_TLS_TRANSPORT = "strict-jdbc-tls";
   public static final String DORIS_FE_NODES = "doris-fenodes";
   public static final String DORIS_QUERY_PORT = "doris-query-port";
+  public static final String ARROW_FLIGHT_SQL_MODE = "doris-arrow-flight-sql-mode";
+  public static final String ARROW_FLIGHT_SQL_PORT = "doris-arrow-flight-sql-port";
+  public static final String ARROW_DISABLED = "disabled";
+  public static final String ARROW_PREFERRED = "preferred";
+  public static final String WRITE_MODE = "doris-write-mode";
+  public static final String WRITE_DISABLED = "disabled";
+  public static final String WRITE_BATCH = "batch";
+  public static final String WRITE_OVERWRITE_MODE = "doris-write-overwrite-mode";
+  public static final String WRITE_OVERWRITE_REJECT = "reject";
+  public static final String WRITE_OVERWRITE_TRUNCATE = "truncate";
   private static final String MYSQL_DRIVER = "com.mysql.cj.jdbc.Driver";
   private static final String MYSQL_URL_PREFIX = "jdbc:mysql://";
   private static final String BYPASS_PREFIX = "gravitino.bypass.";
@@ -49,6 +59,17 @@ public final class DorisJdbcSecurity {
       Set.of("connecttimeout", "sockettimeout");
   private static final Set<String> BYPASS_PROPERTY_ALLOWLIST =
       Set.of("maxidle", "connecttimeout", "sockettimeout", CONNECTION_PROPERTIES);
+  private static final Set<String> SPARK_DORIS_OPTION_ALLOWLIST =
+      Set.of(
+          "doris.request.retries",
+          "doris.request.connect.timeout.ms",
+          "doris.request.read.timeout.ms",
+          "doris.request.query.timeout.s",
+          "doris.request.tablet.size",
+          "doris.batch.size",
+          "doris.exec.mem.limit",
+          "doris.filter.query.in.max.count",
+          "doris.thrift.max.message.size");
 
   private static final Map<String, String> UNSAFE_MYSQL_PARAMETERS =
       normalizedNames(
@@ -144,7 +165,24 @@ public final class DorisJdbcSecurity {
   private static final Set<String> CREDENTIAL_PARAMETERS =
       Set.of("user", "username", "password", "password1", "password2", "password3");
   private static final Set<String> PROTECTED_BYPASS_PROPERTIES =
-      Set.of(JDBC_URL, JDBC_DRIVER, "jdbc-user", "jdbc-password", READ_TRANSPORT);
+      Set.of(
+          JDBC_URL,
+          JDBC_DRIVER,
+          "jdbc-user",
+          "jdbc-password",
+          READ_TRANSPORT,
+          ARROW_FLIGHT_SQL_MODE,
+          ARROW_FLIGHT_SQL_PORT,
+          WRITE_MODE,
+          WRITE_OVERWRITE_MODE,
+          "doris.read.mode",
+          "doris.read.arrow-flight-sql.port",
+          "doris.fe.auto.fetch",
+          "doris.sink.mode",
+          "doris.sink.enable-2pc",
+          "doris.sink.properties.strict_mode",
+          "doris.max.filter.ratio",
+          "doris.write.schemaless");
   private static final Set<String> CANONICAL_PROFILE_PROPERTIES =
       Set.of(
           JDBC_URL,
@@ -153,7 +191,11 @@ public final class DorisJdbcSecurity {
           "jdbc-password",
           READ_TRANSPORT,
           DORIS_FE_NODES,
-          DORIS_QUERY_PORT);
+          DORIS_QUERY_PORT,
+          ARROW_FLIGHT_SQL_MODE,
+          ARROW_FLIGHT_SQL_PORT,
+          WRITE_MODE,
+          WRITE_OVERWRITE_MODE);
 
   private DorisJdbcSecurity() {}
 
@@ -213,8 +255,13 @@ public final class DorisJdbcSecurity {
 
     String readTransport = readTransport(properties);
     boolean strictTransport = STRICT_JDBC_TLS_TRANSPORT.equals(readTransport);
+    String arrowMode = arrowFlightSqlMode(properties);
+    String writeMode = writeMode(properties);
+    String overwriteMode = writeOverwriteMode(properties);
     validateConnection(properties.get(JDBC_URL), properties.get(JDBC_DRIVER), readTransport);
     validateTransportProperties(properties, strictTransport);
+    validateArrowProperties(properties, strictTransport, arrowMode);
+    validateWriteProperties(strictTransport, writeMode, overwriteMode);
 
     for (Map.Entry<String, String> entry : properties.entrySet()) {
       String decodedName = stableDecode(entry.getKey(), "JDBC property name encoding is invalid");
@@ -238,6 +285,26 @@ public final class DorisJdbcSecurity {
     }
     String value = properties.get(READ_TRANSPORT);
     return validateReadTransport(value == null ? HYBRID_TRANSPORT : value);
+  }
+
+  /** Returns the validated Arrow Flight SQL mode, applying the disabled default. */
+  public static String arrowFlightSqlMode(Map<String, String> properties) {
+    return exactEnum(
+        properties, ARROW_FLIGHT_SQL_MODE, ARROW_DISABLED, Set.of(ARROW_DISABLED, ARROW_PREFERRED));
+  }
+
+  /** Returns the validated write mode, applying the disabled default. */
+  public static String writeMode(Map<String, String> properties) {
+    return exactEnum(properties, WRITE_MODE, WRITE_DISABLED, Set.of(WRITE_DISABLED, WRITE_BATCH));
+  }
+
+  /** Returns the validated overwrite mode, applying the reject default. */
+  public static String writeOverwriteMode(Map<String, String> properties) {
+    return exactEnum(
+        properties,
+        WRITE_OVERWRITE_MODE,
+        WRITE_OVERWRITE_REJECT,
+        Set.of(WRITE_OVERWRITE_REJECT, WRITE_OVERWRITE_TRUNCATE));
   }
 
   private static String validateReadTransport(String value) {
@@ -273,6 +340,65 @@ public final class DorisJdbcSecurity {
       }
     } catch (NumberFormatException e) {
       throw new IllegalArgumentException("doris-query-port must be between 1 and 65535");
+    }
+  }
+
+  private static void validateArrowProperties(
+      Map<String, String> properties, boolean strictTransport, String arrowMode) {
+    String port = properties.get(ARROW_FLIGHT_SQL_PORT);
+    if (ARROW_DISABLED.equals(arrowMode)) {
+      if (port != null) {
+        throw new IllegalArgumentException(
+            "doris-arrow-flight-sql-port requires preferred Arrow mode");
+      }
+      return;
+    }
+    if (strictTransport) {
+      throw new IllegalArgumentException(
+          "Strict JDBC TLS transport does not support Arrow Flight SQL");
+    }
+    validatePort(ARROW_FLIGHT_SQL_PORT, port);
+  }
+
+  private static void validateWriteProperties(
+      boolean strictTransport, String writeMode, String overwriteMode) {
+    if (WRITE_DISABLED.equals(writeMode)) {
+      if (!WRITE_OVERWRITE_REJECT.equals(overwriteMode)) {
+        throw new IllegalArgumentException(
+            "doris-write-overwrite-mode=truncate requires doris-write-mode=batch");
+      }
+      return;
+    }
+    if (strictTransport) {
+      throw new IllegalArgumentException(
+          "Strict JDBC TLS transport does not support governed Doris writes");
+    }
+  }
+
+  private static String exactEnum(
+      Map<String, String> properties, String name, String defaultValue, Set<String> allowed) {
+    if (properties == null) {
+      throw new IllegalArgumentException("Doris JDBC catalog properties are required");
+    }
+    String value = properties.get(name);
+    String resolved = value == null ? defaultValue : value;
+    if (!allowed.contains(resolved)) {
+      throw new IllegalArgumentException("Catalog property " + name + " has an unsupported value");
+    }
+    return resolved;
+  }
+
+  private static void validatePort(String name, String value) {
+    if (value == null || !value.matches("[0-9]+")) {
+      throw new IllegalArgumentException(name + " must be between 1 and 65535");
+    }
+    try {
+      int port = Integer.parseInt(value);
+      if (port < 1 || port > 65535) {
+        throw new NumberFormatException("port out of range");
+      }
+    } catch (NumberFormatException e) {
+      throw new IllegalArgumentException(name + " must be between 1 and 65535");
     }
   }
 
@@ -452,6 +578,9 @@ public final class DorisJdbcSecurity {
     if (PROTECTED_BYPASS_PROPERTIES.contains(normalized)) {
       throw new IllegalArgumentException("Protected JDBC properties must not use spark.bypass");
     }
+    if (normalized.startsWith("doris.") && !SPARK_DORIS_OPTION_ALLOWLIST.contains(normalized)) {
+      throw new IllegalArgumentException("Unreviewed Doris Spark bypass option is not allowed");
+    }
     if (strictTransport && normalized.startsWith("doris.")) {
       throw new IllegalArgumentException(
           "Strict JDBC TLS transport must not configure native Doris options");
@@ -464,6 +593,9 @@ public final class DorisJdbcSecurity {
       throw new IllegalArgumentException("JDBC property name is invalid");
     }
     String normalized = normalize(name, "JDBC property name encoding is invalid");
+    if (normalized.startsWith("doris.")) {
+      throw new IllegalArgumentException("Raw Doris connector options are not allowed");
+    }
     if (UNSAFE_POOL_PROPERTIES.containsKey(normalized)) {
       throw new IllegalArgumentException("Unreviewed JDBC connection pool property is not allowed");
     }

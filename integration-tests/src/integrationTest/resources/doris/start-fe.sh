@@ -30,6 +30,7 @@ CONTAINER_IP=$(hostname -i)
 PRIORITY_NETWORKS=$(echo "${CONTAINER_IP}" | awk -F '.' '{print$1"."$2"."$3".0/24"}')
 echo "add priority_networks = ${PRIORITY_NETWORKS} to fe.conf"
 echo "priority_networks = ${PRIORITY_NETWORKS}" >> ${DORIS_FE_HOME}/conf/fe.conf
+echo "arrow_flight_sql_port = 8070" >> ${DORIS_FE_HOME}/conf/fe.conf
 
 if [ "${GOVERNED_DORIS_ENABLE_TLS:-false}" = "true" ]; then
   echo "enable_ssl = true" >> ${DORIS_FE_HOME}/conf/fe.conf

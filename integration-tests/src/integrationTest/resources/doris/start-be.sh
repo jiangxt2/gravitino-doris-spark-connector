@@ -41,6 +41,7 @@ CONTAINER_IP=$(hostname -i)
 PRIORITY_NETWORKS=$(echo "${CONTAINER_IP}" | awk -F '.' '{print$1"."$2"."$3".0/24"}')
 echo "add priority_networks = ${PRIORITY_NETWORKS} to be.conf"
 echo "priority_networks = ${PRIORITY_NETWORKS}" >> ${DORIS_BE_HOME}/conf/be.conf
+echo "arrow_flight_sql_port = 8050" >> ${DORIS_BE_HOME}/conf/be.conf
 echo "report_disk_state_interval_seconds = 10" >> ${DORIS_BE_HOME}/conf/be.conf
 # The macOS Docker VM is shared with long-running development services. Doris otherwise reserves
 # 5% of the VM's total memory (about 800 MiB on a 16 GiB VM) even for this small, isolated IT BE.

@@ -25,8 +25,11 @@ cover property protection, credential resolution, explicit authorization orderin
 schema/type compatibility, cache behavior, hybrid planner state, capability filtering, plugin
 registration, provider loading, distribution assembly, repository container-label configuration,
 resolved Spark-module version consistency, immutable workflow action references, and the shared
-JDBC URL/driver/DBCP security matrix. The distribution contract compares `installDist`, tar, and
-zip file sets, rejects target-provided libraries, and scans every JAR for the MySQL Driver class.
+JDBC URL/driver/DBCP security matrix. They also cover Arrow fallback state/classification/circuit
+behavior, patch-aware write capabilities, forced sink options, write-schema validation, and direct
+rejection of unsupported write operations. The distribution contract compares `installDist`, tar,
+and zip file sets, rejects target-provided libraries, and scans every JAR for the MySQL Driver
+class.
 
 `distribution/gradle.lockfile` strictly locks the three production distribution configurations.
 `gradle/verification-metadata.xml` enables Gradle SHA-256 verification automatically for plugins,
@@ -51,6 +54,11 @@ These commands compile the integration-test source set but do not start Docker. 
 linkage, class loading, the packaged connector distribution, and the complete resolved
 `org.apache.spark` module set. They do not certify real Doris behavior on those two boundary
 versions. The full real-infrastructure certification remains pinned to Spark 3.5.8.
+
+Spark 3.5.0 through 3.5.2 are read-only. Spark 3.5.3 is the minimum write-aware API boundary and is
+validated with a real append/DATETIME smoke in addition to source compilation. Spark 3.5.8 remains
+the only full release/runtime matrix, while 3.5.9 is the current upper compile/unit/distribution
+compatibility boundary.
 
 ## Real-infrastructure gates
 
@@ -77,10 +85,26 @@ installation guidance while FE HTTP and MySQL/JDBC TCP counters remain zero.
 
 The tests verify direct-result parity, planner pushdown, four-partition JDBC parity, type
 normalization, authorization-before-I/O, cache/refresh, unsupported timestamp mutation before
-physical schema change, credential redaction, JDBC configuration rejection, read-only boundaries,
-and strict JDBC TLS transport. The logical/physical scalar and lossy-placeholder rejection matrix
-is exercised in focused unit tests because a real DDL changes both provider metadata and physical
-schema and cannot independently manufacture that mismatch.
+physical schema change, credential redaction, JDBC configuration rejection, capability
+boundaries, strict JDBC TLS transport, Arrow/Thrift fallback, and governed Stream Load writes. The
+logical/physical scalar and lossy-placeholder rejection matrix is exercised in focused unit tests
+because a real DDL changes both provider metadata and physical schema and cannot independently
+manufacture that mismatch.
+
+Arrow cases use real FE/BE Flight ports on both Doris versions. They cover the default no-Arrow
+path, successful Arrow reads, an unavailable port, probe success followed by lazy ADBC failure,
+same-application fail-sticky behavior, a new-application retry, empty results, and failure after a
+row has been delivered. The TCP recorder stores counts only. Because the official ADBC client may
+open asynchronous connections after a failure, decision-bound assertions use the connector's
+hashed attempt counter while real proxy connections prove that transport was actually exercised.
+
+Write cases cover append, Gravitino `MODIFY_TABLE` denial before observed FE HTTP/JDBC I/O, Doris
+`LOAD_PRIV` denial, forced 2PC/strict/filter/schemaless/redirect options, DATETIME precision and
+time-zone round trips, explicit truncate success, and the documented empty-table result when a
+post-truncate load fails. The truncate account intentionally has `SELECT_PRIV, LOAD_PRIV` without
+`ALTER_PRIV` or `DROP_PRIV`: Connector 26.0.0 issues SQL `TRUNCATE TABLE`, and the certified Doris
+3.0.6.2 and 4.0.6 servers enforce that statement with `LOAD_PRIV`. Streaming, predicate/dynamic
+overwrite, and catalog DDL remain rejection tests.
 
 The harness creates a private CA, valid FE certificate, expired certificate, unrelated self-signed
 certificate, and client JVM truststore under `integration-tests/build/tmp`. Nothing containing a
@@ -233,6 +257,68 @@ Gradle XML and HTML reports are under `integration-tests/build/test-results/` an
 CI uploads reports when a gate fails. Failure-time Docker inventory and log collection select only
 containers labeled `io.github.jiangxt2.gravitino-doris-spark-connector.it=true`; the integration
 tests verify that Doris FE, Doris BE, Gravitino, and the TCP proxy carry that label.
+
+## Spark Standalone performance harness
+
+The performance source set is opt-in and is not attached to ordinary `check`:
+
+```bash
+./gradlew performanceTest -PdorisVersion=4.0.6
+```
+
+Defaults are row counts `100000,1000000,10000000`, two warm-ups, and five measured runs. Override
+only for a diagnostic smoke with `-PbenchmarkRowCounts`, `-PbenchmarkWarmups`, and
+`-PbenchmarkRuns`; row counts above ten million and measured runs below three are rejected.
+
+One Spark 3.5.8 Standalone master and three distinct two-core/two-GiB workers are started. Cluster
+deploy mode places the two-core/one-GiB driver alone on one worker and exactly two
+two-core/one-GiB executors on the other two. This profile leaves a measured safety margin for Doris
+and Gravitino in the 15.6-GiB Docker VM used for local certification; the master and worker control
+daemons each use an explicit 512-MiB heap instead of Spark's one-GiB default. Dynamic allocation, AQE,
+speculation, and the UI are disabled; Kryo, UTC, 16 shuffle/default partitions, compression, and
+event logging are fixed.
+Placement is verified by the driver before any sample.
+
+Read baselines are unmodified Gravitino JDBC, bare official Thrift, governed SQL, governed native
+Thrift, and governed Arrow fallback at every configured scale. Successful bare official Arrow and
+governed Arrow throughput samples are collected at 100,000 and 1,000,000 rows. Repeated 10,000,000-
+row Flight SQL actions are deliberately excluded: a real formal run on the fixed 15.6-GiB Docker VM
+reached Doris's 256-MiB system low-water guard and failed with `MEM_ALLOC_FAILED`/
+`MEM_LIMIT_EXCEEDED`. The harness records `arrowMeasurementMaximumRows=1000000`; it does not lower
+Doris's safety threshold or report the failed 10-million-row path as a performance result. JDBC
+catalogs are created per row count so `upperBound` matches the table instead of collapsing smaller
+fixtures into one active partition. Write baselines are Spark JDBC batch append, bare official
+Stream Load, and governed Stream Load; bare and governed Stream Load use the same forced sink
+options.
+
+The one permitted rerun with successful Arrow samples capped at one million rows also stopped at
+Doris's low-water guard after 53 successful randomized warm-up cases, this time while comparing a
+10-million-row wide JDBC scan. Several individual 10-million-row native, Thrift, fallback, and JDBC
+actions had already completed. This distinguishes per-action correctness from sustained-matrix
+capacity: the fixed local VM cannot publish trustworthy median/MAD/confidence-interval rankings for
+the full default matrix. Both failures retain XML/HTML reports and Spark event logs, and neither
+publishes a manifest. Run the default matrix only on a larger isolated Docker VM; diagnostic row or
+iteration overrides are smoke evidence and must not be compared with the fixed profile.
+
+The monotonic timer encloses only the materializing read or write action. Write-target COUNT/SUM
+verification, FE/BE metric fetch, Spark listener drain, and host orchestration time are outside that
+window. Every sample stores rows/s, logical MiB/s, row count/checksum, requested/actual partitions,
+isolated Spark task metrics, and label-free Doris metric deltas/after-values for relevant query,
+scan, load, transaction, rowset, compaction, CPU, network, disk, and memory series. The Doris
+metrics come from the documented FE/BE `/metrics` endpoints. Median, MAD, and a deterministic
+bootstrap confidence interval exclude warm-ups.
+
+Each run writes `manifest-<run-id>.json` through a sibling temporary file and atomic rename. The
+host accepts success only when the run ID matches, the manifest exists without its temporary file,
+and a non-empty Spark event log exists. A redacted `spark-submit-<run-id>.log`, the event log, and
+host `orchestration-<run-id>.properties` remain under
+`integration-tests/build/performance-results/<run-id>/`. Credentials and endpoint values are not
+persisted in the manifest. JDBC, Doris, metrics, and internal Gravitino endpoint values are loaded
+from a read-only ephemeral runtime-properties mount instead of application arguments, so Spark's
+persisted `sun.java.command` does not retain them. The fixed Spark and SQL option redaction regexes
+also redact URL, user, password, credential, secret, and token keys from persisted environment and
+plan records. Results describe only the recorded Doris/Spark/version/workload/profile; they must
+not be generalized into a universal Arrow or connector performance claim.
 
 ## Release evidence boundary
 

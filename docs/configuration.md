@@ -11,6 +11,10 @@
 | `doris-read-transport` | no | `hybrid` (default) or `strict-jdbc-tls` |
 | `doris-fenodes` | hybrid only | Comma-separated `host:httpPort` FE endpoints; rejected by strict profile |
 | `doris-query-port` | hybrid only | FE MySQL query port; rejected by strict profile |
+| `doris-arrow-flight-sql-mode` | no | `disabled` (default) or experimental `preferred`; rejected by strict profile |
+| `doris-arrow-flight-sql-port` | preferred only | Catalog-managed FE Arrow Flight SQL port in `1..65535` |
+| `doris-write-mode` | no | `disabled` (default) or `batch`; batch requires Spark 3.5.3+ and hybrid transport |
+| `doris-write-overwrite-mode` | no | `reject` (default) or explicit non-atomic `truncate`; truncate requires batch write |
 | `credential-providers` | no | Explicitly set `jdbc-user-password`; JDBC catalogs also add it automatically |
 
 The FE endpoint parser accepts optional whitespace around commas, validates every `host:port`, and
@@ -137,6 +141,9 @@ client. Gravitino metadata, Spark physical schema, and Spark reads all use `jdbc
 `fallbackToSystemTrustStore` may be omitted (Connector/J 8.0.33 defaults it to `true`) or supplied
 once with the exact value `true`; `false` is rejected.
 
+Arrow `preferred` and batch write are independently opt-in, but both require `hybrid`. They are
+rejected rather than silently ignored by `strict-jdbc-tls`.
+
 Strict URL TLS controls are fail closed:
 
 | Parameter family | Contract |
@@ -175,6 +182,79 @@ The adapter captures the partition tuple and fetch size when the Spark catalog i
 After changing any of these Gravitino catalog properties, recreate the Spark session so the catalog
 loads the new values.
 
+## Arrow Flight SQL
+
+Arrow Flight SQL is disabled by default. To attempt it for native detail scans, set both catalog
+properties:
+
+```properties
+doris-arrow-flight-sql-mode=preferred
+doris-arrow-flight-sql-port=8070
+```
+
+This port is declared and validated by the Gravitino server provider and then treated as immutable
+catalog state. It cannot come from a Spark option, `spark.bypass.*`, raw `doris.*` property, or
+official FE auto-discovery. The Spark adapter forces `doris.fe.auto.fetch=false` and maps only the
+managed port to the official connector.
+
+The preferred path applies only after planning selects the native detail lane. It first performs a
+TCP connect probe with at most one second per FE and a three-second budget across the complete
+catalog-managed FE list. Probe success is not a connection guarantee: lazy ADBC connection or query
+initialization can still fail. A classified unavailable-I/O/timeout/not-implemented failure
+before the first delivered row closes Arrow and starts the same partition's Thrift reader.
+Authentication, authorization, query, schema, conversion, cancellation, interruption, and data
+errors fail the task. No fallback is allowed after one Arrow row has been delivered.
+
+One eligible failure opens an executor-JVM circuit identified by a hash of Spark application ID
+and endpoint identity. Later partitions in that application skip Arrow. The circuit has no
+cooldown or automatic reset in this release, deliberately bounding repeated failure/resource
+churn. A long-lived notebook or Spark Thrift Server therefore continues on Thrift until a new
+Spark application is started. The current official Arrow implementation uses insecure gRPC and
+row-wise `InternalRow` conversion; enabling it is not a strict TLS or native-columnar claim.
+
+## Governed batch write
+
+The default remains read-only. Enable append on Spark 3.5.3 or newer with:
+
+```properties
+doris-write-mode=batch
+doris-write-overwrite-mode=reject
+```
+
+Spark 3.5.0 through 3.5.2 ignore no setting: they retain read capabilities and fail closed for all
+writes. The Spark principal must have Gravitino `MODIFY_TABLE` before a physical write delegate is
+created. The Doris technical user must have `SELECT_PRIV` for the governed read/schema path and
+`LOAD_PRIV` (documented by Doris as the load/INSERT data-plane privilege) for Stream Load. For
+truncate overwrite, official Connector 26.0.0 first issues Doris SQL `TRUNCATE TABLE` through
+`DorisFrontendClient` and then creates the Stream Load writer. Doris 3.0.6.2 and 4.0.6 both check
+that SQL operation with `LOAD_PRIV`; real tests prove a user with `SELECT_PRIV, LOAD_PRIV` and
+without `ALTER_PRIV`/`DROP_PRIV` can use it.
+
+Every batch write forces the following effective official connector options after all user input:
+
+| Official option | Forced value |
+| --- | --- |
+| `doris.sink.mode` | `stream_load` |
+| `doris.sink.enable-2pc` | `true` |
+| `doris.sink.properties.strict_mode` | `true` |
+| `doris.max.filter.ratio` | `0` |
+| `doris.write.schemaless` | `false` |
+| `doris.sink.auto-redirect` | `false` |
+
+Raw, bypass, or per-write options cannot change this contract. The writer accepts exact column
+count/order/names, safe nullability, and certified lossless types. A Doris DATETIME column is the
+only normalized write family: its final String must exactly match `yyyy-MM-dd HH:mm:ss` for
+precision zero or include exactly the declared 1..6 fractional digits. Spark Timestamp input is
+first converted by Spark's assignment rule using the analysis-time `spark.sql.session.timeZone`;
+the connector validates the resulting String per row.
+
+`append()` is supported. Streaming writes, predicate overwrite, dynamic overwrite, CTAS, DDL,
+UPDATE, DELETE, and MERGE are rejected. Setting `doris-write-overwrite-mode=truncate` adds only
+full-table truncate overwrite. It is a non-atomic SQL truncate-then-load compatibility operation: if
+writer creation, precommit, or commit later fails, the old rows are already gone and the target can
+be empty or partially loaded. 2PC is per official writer transaction and is not a job-wide atomic
+commit guarantee.
+
 ## Schema cache properties
 
 | Property | Default | Validation |
@@ -207,6 +287,8 @@ The following keys are protected regardless of whether they came from Spark cata
 Gravitino `spark.bypass.*` property:
 
 - `doris.fenodes`, `doris.query.port`, `doris.user`, `doris.password`;
+- `doris.read.mode`, `doris.read.arrow-flight-sql.port`, `doris.fe.auto.fetch`;
+- all `doris.sink.*`, `doris.max.filter.ratio`, and `doris.write.schemaless` settings;
 - JDBC URL, driver, user, and password;
 - generated `dbtable`/query values;
 - `doris-read-transport`.

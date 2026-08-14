@@ -40,13 +40,19 @@ final class DorisTestCluster implements AutoCloseable {
   static final String ROOT_USER = "root";
   static final String TEST_USER = "governed_reader";
   static final String TEST_PASSWORD = "DorisGovernedIt42";
+  static final String LOAD_USER = "governed_load_only";
+  static final String LOAD_PASSWORD = "DorisGovernedLoad42";
+  static final String READ_ONLY_USER = "governed_read_only";
+  static final String READ_ONLY_PASSWORD = "DorisGovernedRead42";
 
   private static final Logger LOG = LoggerFactory.getLogger(DorisTestCluster.class);
   private static final String FE_SERVICE = "doris-fe";
   private static final String BE_SERVICE = "doris-be";
   private static final int FE_HTTP_PORT = 8030;
+  private static final int FE_FLIGHT_SQL_PORT = 8070;
   private static final int FE_MYSQL_PORT = 9030;
   private static final int BE_HTTP_PORT = 8040;
+  private static final int BE_FLIGHT_SQL_PORT = 8050;
   private static final int BE_HEARTBEAT_PORT = 9050;
   private static final String EXPIRED_CERTIFICATE = "/tmp/expired-server-certificate.p12";
   private static final String UNKNOWN_CA_CERTIFICATE = "/tmp/unknown-ca-server-certificate.p12";
@@ -83,12 +89,14 @@ final class DorisTestCluster implements AutoCloseable {
                 FE_MYSQL_PORT,
                 Wait.forListeningPort().withStartupTimeout(Duration.ofMinutes(4)))
             .withExposedService(FE_SERVICE, FE_HTTP_PORT)
+            .withExposedService(FE_SERVICE, FE_FLIGHT_SQL_PORT)
             .withExposedService(
                 BE_SERVICE,
                 1,
                 BE_HEARTBEAT_PORT,
                 Wait.forListeningPort().withStartupTimeout(Duration.ofMinutes(4)))
             .withExposedService(BE_SERVICE, 1, BE_HTTP_PORT)
+            .withExposedService(BE_SERVICE, 1, BE_FLIGHT_SQL_PORT)
             .withScaledService(BE_SERVICE, 1)
             .withStartupTimeout(Duration.ofMinutes(4))
             .withTailChildContainers(true)
@@ -273,6 +281,12 @@ final class DorisTestCluster implements AutoCloseable {
       statement.execute(
           format("CREATE USER IF NOT EXISTS '%s' IDENTIFIED BY '%s'", TEST_USER, TEST_PASSWORD));
       statement.execute(format("GRANT ADMIN_PRIV ON *.*.* TO '%s'", TEST_USER));
+      statement.execute(
+          format("CREATE USER IF NOT EXISTS '%s' IDENTIFIED BY '%s'", LOAD_USER, LOAD_PASSWORD));
+      statement.execute(
+          format(
+              "CREATE USER IF NOT EXISTS '%s' IDENTIFIED BY '%s'",
+              READ_ONLY_USER, READ_ONLY_PASSWORD));
     } catch (Exception e) {
       throw new IllegalStateException("Failed to create the Doris integration-test user", e);
     }

@@ -93,10 +93,12 @@ manufacture that mismatch.
 
 Arrow cases use real FE/BE Flight ports on both Doris versions. They cover the default no-Arrow
 path, successful Arrow reads, an unavailable port, probe success followed by lazy ADBC failure,
-same-application fail-sticky behavior, a new-application retry, empty results, and failure after a
-row has been delivered. The TCP recorder stores counts only. Because the official ADBC client may
-open asynchronous connections after a failure, decision-bound assertions use the connector's
-hashed attempt counter while real proxy connections prove that transport was actually exercised.
+same-application fail-sticky behavior, a new-application retry, and empty results. The TCP
+recorder stores counts only. Because the official ADBC client may open asynchronous connections
+after a failure, decision-bound assertions use the connector's hashed attempt counter while real
+proxy connections prove that transport was actually exercised. Failure after a row has been
+delivered is verified by unit test (TestDorisArrowFallbackPartitionReader35) using a FakeReader;
+real Doris fault injection for this path is not yet implemented.
 
 Write cases cover append, Gravitino `MODIFY_TABLE` denial before observed FE HTTP/JDBC I/O, Doris
 `LOAD_PRIV` denial, forced 2PC/strict/filter/schemaless/redirect options, DATETIME precision and

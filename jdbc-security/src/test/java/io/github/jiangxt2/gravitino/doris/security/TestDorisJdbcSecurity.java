@@ -571,6 +571,83 @@ public class TestDorisJdbcSecurity {
         "socketTimeout=1;sessionVariables=time_zone='+00:00'");
   }
 
+  @Test
+  void validatesManagedArrowAndWriteCombinations() {
+    Map<String, String> arrow = validServerProperties();
+    arrow.put(DorisJdbcSecurity.ARROW_FLIGHT_SQL_MODE, DorisJdbcSecurity.ARROW_PREFERRED);
+    arrow.put(DorisJdbcSecurity.ARROW_FLIGHT_SQL_PORT, "8070");
+    arrow.put(DorisJdbcSecurity.WRITE_MODE, DorisJdbcSecurity.WRITE_BATCH);
+    arrow.put(DorisJdbcSecurity.WRITE_OVERWRITE_MODE, DorisJdbcSecurity.WRITE_OVERWRITE_TRUNCATE);
+    assertThatCode(() -> DorisJdbcSecurity.validateServerCatalogProperties(arrow))
+        .doesNotThrowAnyException();
+
+    Map<String, String> missingPort = validServerProperties();
+    missingPort.put(DorisJdbcSecurity.ARROW_FLIGHT_SQL_MODE, DorisJdbcSecurity.ARROW_PREFERRED);
+    assertThatThrownBy(() -> DorisJdbcSecurity.validateServerCatalogProperties(missingPort))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("1 and 65535");
+
+    Map<String, String> disabledWithPort = validServerProperties();
+    disabledWithPort.put(DorisJdbcSecurity.ARROW_FLIGHT_SQL_PORT, "8070");
+    assertThatThrownBy(() -> DorisJdbcSecurity.validateServerCatalogProperties(disabledWithPort))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("requires preferred");
+
+    Map<String, String> disabledTruncate = validServerProperties();
+    disabledTruncate.put(
+        DorisJdbcSecurity.WRITE_OVERWRITE_MODE, DorisJdbcSecurity.WRITE_OVERWRITE_TRUNCATE);
+    assertThatThrownBy(() -> DorisJdbcSecurity.validateServerCatalogProperties(disabledTruncate))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("requires doris-write-mode=batch");
+  }
+
+  @Test
+  void strictJdbcTlsRejectsArrowAndWritesBeforePhysicalInitialization() {
+    Map<String, String> arrow = strictServerProperties();
+    arrow.put(DorisJdbcSecurity.ARROW_FLIGHT_SQL_MODE, DorisJdbcSecurity.ARROW_PREFERRED);
+    arrow.put(DorisJdbcSecurity.ARROW_FLIGHT_SQL_PORT, "8070");
+    assertThatThrownBy(() -> DorisJdbcSecurity.validateServerCatalogProperties(arrow))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("does not support Arrow");
+
+    Map<String, String> write = strictServerProperties();
+    write.put(DorisJdbcSecurity.WRITE_MODE, DorisJdbcSecurity.WRITE_BATCH);
+    assertThatThrownBy(() -> DorisJdbcSecurity.validateServerCatalogProperties(write))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("does not support governed Doris writes");
+  }
+
+  @Test
+  void rejectsRawAndSparkBypassConnectorControlsWithoutEchoingValues() {
+    for (String property :
+        new String[] {
+          "doris.read.mode",
+          "doris.read.arrow-flight-sql.port",
+          "doris.fe.auto.fetch",
+          "doris.sink.mode",
+          "doris.sink.enable-2pc",
+          "doris.sink.properties.strict_mode",
+          "doris.sink.properties.format"
+        }) {
+      Map<String, String> direct = validServerProperties();
+      direct.put(property, "secret-canary");
+      assertThatThrownBy(() -> DorisJdbcSecurity.validateServerCatalogProperties(direct))
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessage("Raw Doris connector options are not allowed")
+          .hasMessageNotContaining("secret-canary");
+
+      Map<String, String> bypass = validServerProperties();
+      bypass.put("spark.bypass." + property, "secret-canary");
+      assertThatThrownBy(() -> DorisJdbcSecurity.validateServerCatalogProperties(bypass))
+          .isInstanceOf(IllegalArgumentException.class)
+          .hasMessage(
+              property.equals("doris.sink.properties.format")
+                  ? "Unreviewed Doris Spark bypass option is not allowed"
+                  : "Protected JDBC properties must not use spark.bypass")
+          .hasMessageNotContaining("secret-canary");
+    }
+  }
+
   private static Map<String, String> validServerProperties() {
     Map<String, String> properties = new HashMap<>();
     properties.put("jdbc-url", "jdbc:mysql://fe:9030/");

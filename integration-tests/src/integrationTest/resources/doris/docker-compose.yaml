@@ -37,6 +37,7 @@ services:
       GOVERNED_DORIS_ENABLE_TLS: ${GOVERNED_DORIS_ENABLE_TLS:-false}
     ports:
       - "8030"
+      - "8070"
       - "9030"
     volumes:
       - ./start-fe.sh:/opt/apache-doris/start-fe.sh
@@ -60,6 +61,7 @@ services:
     entrypoint: ["bash"]
     ports:
       - "8040"
+      - "8050"
       - "9050"
     volumes:
       - ./start-be.sh:/opt/apache-doris/start-be.sh

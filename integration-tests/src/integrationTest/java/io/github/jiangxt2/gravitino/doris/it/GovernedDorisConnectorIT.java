@@ -96,6 +96,13 @@ public class GovernedDorisConnectorIT {
   private static final String STRICT_RECORDER_CONTROL_CATALOG =
       "governed_doris_strict_recorder_control";
   private static final String STRICT_DENIAL_CATALOG = "governed_doris_strict_denial";
+  private static final String ARROW_CATALOG = "governed_doris_arrow";
+  private static final String ARROW_FALLBACK_CATALOG = "governed_doris_arrow_fallback";
+  private static final String WRITE_CATALOG = "governed_doris_write";
+  private static final String TRUNCATE_WRITE_CATALOG = "governed_doris_truncate_write";
+  private static final String WRITE_DENIAL_CATALOG = "governed_doris_write_denial";
+  private static final String DORIS_WRITE_DENIAL_CATALOG = "governed_doris_load_denial";
+  private static final String DORIS_TRUNCATE_DENIAL_CATALOG = "governed_doris_truncate_load_denial";
   private static final String PROVIDER = "doris-governed";
   private static final String SCHEMA = "connector_it";
   private static final String COMMON_TABLE = "common_types";
@@ -108,9 +115,20 @@ public class GovernedDorisConnectorIT {
   private static final String DRIFT_TABLE = "drift_table";
   private static final String DENIED_TABLE = "denied_table";
   private static final String WIDE_DECIMAL_TABLE = "wide_decimal";
+  private static final String WRITE_APPEND_TABLE = "write_append_types";
+  private static final String WRITE_TRUNCATE_TABLE = "write_truncate_types";
+  private static final String WRITE_DENIED_TABLE = "write_denied_types";
+  private static final String WRITE_DORIS_DENIED_TABLE = "write_doris_denied_types";
+  private static final String WRITE_BULK_TABLE = "write_bulk_types";
+  private static final String WRITE_FAILURE_TABLE = "write_failure_types";
+  private static final String WRITE_DATETIME_TABLE = "write_datetime_types";
   private static final String READER = "doris_it_reader";
   private static final String READER_ROLE = "doris_it_reader_role";
   private static final String NULL_VALUE = "<null>";
+  private static final String ARROW_CIRCUIT_PROPERTY_PREFIX =
+      "spark.gravitino.doris.arrow.circuit.";
+  private static final String ARROW_ATTEMPT_PROPERTY_PREFIX =
+      "spark.gravitino.doris.arrow.attempt.";
   private static final List<TypeContractProbe> TYPE_CONTRACT_PROBES =
       Arrays.asList(
           TypeContractProbe.supported(
@@ -287,6 +305,453 @@ public class GovernedDorisConnectorIT {
         TYPE_CONTRACT_PROBES.stream()
             .map(probe -> (Executable) () -> assertTypeContractProbe(probe))
             .collect(Collectors.toList()));
+  }
+
+  @Test
+  @Order(20)
+  void usesArrowFlightSqlForTheNativeLane() throws Exception {
+    RecordingDorisTcpProxy.State reset = tcpProxy.reset(RecordingDorisTcpProxy.Lane.FLIGHT);
+    assertThat(reset.accepted()).isZero();
+    assertThat(reset.active()).isZero();
+
+    Dataset<Row> frame =
+        spark.sql(
+            "SELECT id, label FROM "
+                + qualified(ARROW_CATALOG, COMMON_TABLE)
+                + " WHERE id <= 3 ORDER BY id");
+    assertThat(sparkRows(frame))
+        .containsExactlyElementsOf(
+            jdbcRows(
+                "SELECT id, label FROM `"
+                    + SCHEMA
+                    + "`.`"
+                    + COMMON_TABLE
+                    + "` WHERE id <= 3 ORDER BY id"));
+    assertThat(frame.queryExecution().executedPlan().toString())
+        .contains("DorisScanV2")
+        .doesNotContain("JDBCScan");
+    await()
+        .atMost(Duration.ofSeconds(5))
+        .untilAsserted(
+            () -> {
+              RecordingDorisTcpProxy.State state =
+                  tcpProxy.state(RecordingDorisTcpProxy.Lane.FLIGHT);
+              assertThat(state.accepted()).isPositive();
+              assertThat(state.active()).isZero();
+            });
+  }
+
+  @Test
+  @Order(21)
+  void fallsBackAfterProbeSuccessAndScopesTheCircuitToOneApplication() throws Exception {
+    RecordingDorisTcpProxy.State unavailable = tcpProxy.setFlightFailureAvailable(false);
+    assertThat(unavailable.active()).isZero();
+    RecordingDorisTcpProxy.State reset = tcpProxy.reset(RecordingDorisTcpProxy.Lane.FLIGHT_FAILURE);
+    assertThat(reset.accepted()).isZero();
+    assertThat(reset.active()).isZero();
+    String query =
+        "SELECT id, label FROM "
+            + qualified(ARROW_FALLBACK_CATALOG, COMMON_TABLE)
+            + " WHERE id <= 3 ORDER BY id";
+    List<String> expected =
+        jdbcRows(
+            "SELECT id, label FROM `"
+                + SCHEMA
+                + "`.`"
+                + COMMON_TABLE
+                + "` WHERE id <= 3 ORDER BY id");
+    long attemptsBeforeFailure = arrowAttemptCount();
+
+    assertThat(sparkRows(spark.sql(query))).containsExactlyElementsOf(expected);
+    long firstAcceptedConnections =
+        awaitSettledAcceptedConnections(RecordingDorisTcpProxy.Lane.FLIGHT_FAILURE);
+    long firstArrowAttempts = arrowAttemptCount();
+    assertThat(firstArrowAttempts)
+        .as("only the tasks already in flight may enter Arrow before the circuit opens")
+        .isGreaterThan(attemptsBeforeFailure)
+        .isLessThanOrEqualTo(attemptsBeforeFailure + 2L);
+    List<String> firstCircuitKeys = arrowCircuitPropertyKeys();
+    assertThat(firstCircuitKeys).hasSize(1);
+
+    assertThat(sparkRows(spark.newSession().sql(query))).containsExactlyElementsOf(expected);
+    assertThat(arrowCircuitPropertyKeys()).containsExactlyElementsOf(firstCircuitKeys);
+    assertThat(arrowAttemptCount())
+        .as("a new session in the same application must bypass the failed Arrow endpoint")
+        .isEqualTo(firstArrowAttempts);
+    await()
+        .atMost(Duration.ofSeconds(5))
+        .untilAsserted(
+            () -> {
+              RecordingDorisTcpProxy.State state =
+                  tcpProxy.state(RecordingDorisTcpProxy.Lane.FLIGHT_FAILURE);
+              assertThat(state.active()).isZero();
+            });
+
+    RecordingDorisTcpProxy.State recovered = tcpProxy.setFlightFailureAvailable(true);
+    assertThat(recovered.active()).isZero();
+    assertThat(sparkRows(spark.sql(query))).containsExactlyElementsOf(expected);
+    assertThat(arrowAttemptCount())
+        .as("endpoint recovery must not reset the fail-sticky application circuit")
+        .isEqualTo(firstArrowAttempts);
+    long acceptedBeforeNewApplication =
+        tcpProxy.state(RecordingDorisTcpProxy.Lane.FLIGHT_FAILURE).accepted();
+    assertThat(acceptedBeforeNewApplication).isGreaterThanOrEqualTo(firstAcceptedConnections);
+
+    spark.close();
+    SparkSession.clearActiveSession();
+    SparkSession.clearDefaultSession();
+    spark = null;
+    startSpark();
+
+    assertThat(sparkRows(spark.sql(query))).containsExactlyElementsOf(expected);
+    assertThat(arrowAttemptCount())
+        .as("a new Spark application must get a distinct Arrow attempt key")
+        .isGreaterThan(firstArrowAttempts);
+    await()
+        .atMost(Duration.ofSeconds(5))
+        .untilAsserted(
+            () -> {
+              RecordingDorisTcpProxy.State state =
+                  tcpProxy.state(RecordingDorisTcpProxy.Lane.FLIGHT_FAILURE);
+              assertThat(state.accepted())
+                  .as("a new Spark application must retry the recovered Arrow endpoint")
+                  .isGreaterThan(acceptedBeforeNewApplication);
+            });
+  }
+
+  @Test
+  @Order(22)
+  void differentiatesArrowForMultiTabletEmptyAndSqlLimitLanes() throws Exception {
+    RecordingDorisTcpProxy.State reset = tcpProxy.reset(RecordingDorisTcpProxy.Lane.FLIGHT);
+    assertThat(reset.accepted()).isZero();
+
+    Dataset<Row> multiTablet =
+        spark.sql("SELECT id, label FROM " + qualified(ARROW_CATALOG, COMMON_TABLE));
+    assertThat(multiTablet.rdd().getNumPartitions()).isGreaterThan(1);
+    assertThat(sorted(sparkRows(multiTablet)))
+        .isEqualTo(
+            sorted(jdbcRows("SELECT id, label FROM `" + SCHEMA + "`.`" + COMMON_TABLE + "`")));
+    assertThat(
+            sparkRows(
+                spark.sql(
+                    "SELECT id FROM " + qualified(ARROW_CATALOG, COMMON_TABLE) + " WHERE id < 0")))
+        .isEmpty();
+    await()
+        .atMost(Duration.ofSeconds(5))
+        .untilAsserted(
+            () ->
+                assertThat(tcpProxy.state(RecordingDorisTcpProxy.Lane.FLIGHT).accepted())
+                    .isGreaterThan(1));
+    await()
+        .atMost(Duration.ofSeconds(5))
+        .untilAsserted(
+            () -> assertThat(tcpProxy.state(RecordingDorisTcpProxy.Lane.FLIGHT).active()).isZero());
+
+    tcpProxy.reset(RecordingDorisTcpProxy.Lane.FLIGHT);
+    Dataset<Row> limited =
+        spark.sql(
+            "SELECT id FROM " + qualified(ARROW_CATALOG, COMMON_TABLE) + " ORDER BY id LIMIT 3");
+    assertThat(sparkRows(limited))
+        .containsExactlyElementsOf(
+            jdbcRows("SELECT id FROM `" + SCHEMA + "`.`" + COMMON_TABLE + "` ORDER BY id LIMIT 3"));
+    assertThat(limited.queryExecution().executedPlan().toString())
+        .contains("JDBCScan")
+        .doesNotContain("DorisScanV2");
+    await()
+        .during(Duration.ofSeconds(1))
+        .atMost(Duration.ofSeconds(3))
+        .untilAsserted(
+            () ->
+                assertThat(tcpProxy.state(RecordingDorisTcpProxy.Lane.FLIGHT).accepted()).isZero());
+  }
+
+  @Test
+  @Order(30)
+  void appendsGovernedRowsAndRoundTripsDatetime() throws Exception {
+    spark
+        .sql(
+            "INSERT INTO "
+                + qualified(WRITE_CATALOG, WRITE_APPEND_TABLE)
+                + " VALUES (101, 'alpha', '2026-08-14 12:34:56.123456', 12.345), "
+                + "(102, NULL, NULL, NULL)")
+        .collectAsList();
+
+    await()
+        .atMost(Duration.ofSeconds(30))
+        .untilAsserted(
+            () ->
+                assertThat(
+                        jdbcRows(
+                            "SELECT id, label, event_time, amount FROM `"
+                                + SCHEMA
+                                + "`.`"
+                                + WRITE_APPEND_TABLE
+                                + "` ORDER BY id"))
+                    .containsExactly(
+                        "101,alpha,2026-08-14 12:34:56.123456,12.345", "102,<null>,<null>,<null>"));
+
+    assertThatThrownBy(
+            () ->
+                spark
+                    .sql(
+                        "INSERT OVERWRITE "
+                            + qualified(WRITE_CATALOG, WRITE_APPEND_TABLE)
+                            + " VALUES (103, 'blocked', NULL, NULL)")
+                    .collectAsList())
+        .hasMessageContaining("write")
+        .hasMessageContaining("read-only");
+    assertThat(jdbcRows("SELECT id FROM `" + SCHEMA + "`.`" + WRITE_APPEND_TABLE + "` ORDER BY id"))
+        .containsExactly("101", "102");
+  }
+
+  @Test
+  @Order(31)
+  void replacesRowsOnlyForExplicitTruncateOverwrite() throws Exception {
+    List<String> loadUserGrants = jdbcRows("SHOW GRANTS FOR '" + DorisTestCluster.LOAD_USER + "'");
+    assertThat(loadUserGrants)
+        .anyMatch(row -> row.toLowerCase(Locale.ROOT).contains("load_priv"))
+        .noneMatch(
+            row -> {
+              String normalized = row.toLowerCase(Locale.ROOT);
+              return normalized.contains("alter_priv") || normalized.contains("drop_priv");
+            });
+    spark
+        .sql(
+            "INSERT INTO "
+                + qualified(TRUNCATE_WRITE_CATALOG, WRITE_TRUNCATE_TABLE)
+                + " VALUES (201, 'before', NULL, 1.000)")
+        .collectAsList();
+    spark
+        .sql(
+            "INSERT OVERWRITE "
+                + qualified(TRUNCATE_WRITE_CATALOG, WRITE_TRUNCATE_TABLE)
+                + " VALUES (202, 'after', '2026-08-14 01:02:03.000001', 2.000)")
+        .collectAsList();
+
+    await()
+        .atMost(Duration.ofSeconds(30))
+        .untilAsserted(
+            () ->
+                assertThat(
+                        jdbcRows(
+                            "SELECT id, label, event_time, amount FROM `"
+                                + SCHEMA
+                                + "`.`"
+                                + WRITE_TRUNCATE_TABLE
+                                + "` ORDER BY id"))
+                    .containsExactly("202,after,2026-08-14 01:02:03.000001,2.000"));
+  }
+
+  @Test
+  @Order(32)
+  void deniesModifyBeforeAnyObservedDorisIo() {
+    RecordingDorisTcpProxy.State jdbcReset = tcpProxy.reset(RecordingDorisTcpProxy.Lane.DENIAL);
+    feProxy.reset();
+    SparkSession deniedSession = spark.newSession();
+    CatalogManager manager = deniedSession.sessionState().catalogManager();
+    try {
+      assertThatThrownBy(
+              () ->
+                  deniedSession
+                      .sql(
+                          "INSERT INTO "
+                              + qualified(WRITE_DENIAL_CATALOG, WRITE_DENIED_TABLE)
+                              + " VALUES (301, 'denied', NULL, NULL)")
+                      .collectAsList())
+          .hasMessageContaining("not authorized")
+          .hasMessageContaining("loadTable")
+          .hasMessageNotContaining(DorisTestCluster.TEST_PASSWORD);
+      assertTcpLaneRemainsZero(RecordingDorisTcpProxy.Lane.DENIAL, jdbcReset.generation());
+      assertThat(feProxy.totalRequestCount()).isZero();
+    } finally {
+      manager.reset();
+    }
+  }
+
+  @Test
+  @Order(33)
+  void deniesWriteWhenTheVendedDorisAccountLacksLoadPrivilege() throws Exception {
+    assertThatThrownBy(
+            () ->
+                spark
+                    .sql(
+                        "INSERT INTO "
+                            + qualified(DORIS_WRITE_DENIAL_CATALOG, WRITE_DORIS_DENIED_TABLE)
+                            + " VALUES (401, 'denied-by-doris', NULL, NULL)")
+                    .collectAsList())
+        .hasMessageNotContaining(DorisTestCluster.READ_ONLY_PASSWORD)
+        .hasMessageNotContaining(DorisTestCluster.TEST_PASSWORD);
+    assertThat(jdbcRows("SELECT id FROM `" + SCHEMA + "`.`" + WRITE_DORIS_DENIED_TABLE + "`"))
+        .isEmpty();
+  }
+
+  @Test
+  @Order(34)
+  void writesEmptyAndMultiPartitionBatches() throws Exception {
+    Dataset<Row> input =
+        spark
+            .range(100_000)
+            .repartition(4)
+            .selectExpr(
+                "CAST(id AS INT) AS id",
+                "CAST(CONCAT('row-', id) AS STRING) AS label",
+                "CAST(NULL AS STRING) AS event_time",
+                "CAST(id % 100000 AS DECIMAL(18,3)) AS amount");
+    input.limit(0).writeTo(qualified(WRITE_CATALOG, WRITE_BULK_TABLE)).append();
+    assertThat(jdbcRows("SELECT COUNT(*) FROM `" + SCHEMA + "`.`" + WRITE_BULK_TABLE + "`"))
+        .containsExactly("0");
+
+    input.writeTo(qualified(WRITE_CATALOG, WRITE_BULK_TABLE)).append();
+    await()
+        .atMost(Duration.ofMinutes(2))
+        .untilAsserted(
+            () ->
+                assertThat(
+                        jdbcRows(
+                            "SELECT COUNT(*), SUM(id) FROM `"
+                                + SCHEMA
+                                + "`.`"
+                                + WRITE_BULK_TABLE
+                                + "`"))
+                    .containsExactly("100000,4999950000"));
+  }
+
+  @Test
+  @Order(35)
+  void rejectsInvalidDatetimeWithoutCommittingRows() throws Exception {
+    assertThatThrownBy(
+            () ->
+                spark
+                    .sql(
+                        "INSERT INTO "
+                            + qualified(WRITE_CATALOG, WRITE_FAILURE_TABLE)
+                            + " VALUES (501, 'valid', '2026-08-14 00:00:00.000001', 1.000), "
+                            + "(502, 'invalid', 'not-a-datetime', 2.000)")
+                    .collectAsList())
+        .hasMessageNotContaining(DorisTestCluster.LOAD_PASSWORD)
+        .hasMessageNotContaining(DorisTestCluster.TEST_PASSWORD);
+    assertThat(jdbcRows("SELECT id FROM `" + SCHEMA + "`.`" + WRITE_FAILURE_TABLE + "`")).isEmpty();
+
+    String oversizedLabel = "x".repeat(65);
+    assertThatThrownBy(
+            () ->
+                spark
+                    .sql(
+                        "INSERT INTO "
+                            + qualified(WRITE_CATALOG, WRITE_FAILURE_TABLE)
+                            + " VALUES (503, 'valid', '2026-08-14 00:00:00.000001', 3.000), "
+                            + "(504, '"
+                            + oversizedLabel
+                            + "', '2026-08-14 00:00:00.000002', 4.000)")
+                    .collectAsList())
+        .hasMessageNotContaining(oversizedLabel)
+        .hasMessageNotContaining(DorisTestCluster.LOAD_PASSWORD);
+    assertThat(jdbcRows("SELECT id FROM `" + SCHEMA + "`.`" + WRITE_FAILURE_TABLE + "`")).isEmpty();
+  }
+
+  @Test
+  @Order(36)
+  void roundTripsCertifiedDatetimeInputsWithExplicitTimezoneSemantics() throws Exception {
+    String originalTimezone = spark.conf().get("spark.sql.session.timeZone");
+    List<String> timestampExpected = new ArrayList<>();
+    try {
+      insertDatetimeRows("UTC", 600);
+      insertDatetimeRows("America/Los_Angeles", 700);
+      timestampExpected.addAll(insertTimestampDatetimeRow("UTC", 801));
+      timestampExpected.addAll(insertTimestampDatetimeRow("America/Los_Angeles", 802));
+    } finally {
+      spark.conf().set("spark.sql.session.timeZone", originalTimezone);
+    }
+
+    assertThat(
+            jdbcRows(
+                "SELECT id, dt0, dt3, dt6 FROM `"
+                    + SCHEMA
+                    + "`.`"
+                    + WRITE_DATETIME_TABLE
+                    + "` WHERE id < 800 ORDER BY id"))
+        .containsExactly(
+            "600,1969-12-31 23:59:59,1969-12-31 23:59:59.001,1969-12-31 23:59:59.000001",
+            "601,2024-02-29 12:34:56,2024-02-29 12:34:56.123,2024-02-29 12:34:56.123456",
+            "602,2024-03-10 02:30:00,2024-11-03 01:30:00.999,2024-11-03 01:30:00.999999",
+            "603,<null>,<null>,<null>",
+            "700,1969-12-31 23:59:59,1969-12-31 23:59:59.001,1969-12-31 23:59:59.000001",
+            "701,2024-02-29 12:34:56,2024-02-29 12:34:56.123,2024-02-29 12:34:56.123456",
+            "702,2024-03-10 02:30:00,2024-11-03 01:30:00.999,2024-11-03 01:30:00.999999",
+            "703,<null>,<null>,<null>");
+
+    assertThatThrownBy(
+            () ->
+                spark
+                    .sql(
+                        "INSERT INTO "
+                            + qualified(WRITE_CATALOG, WRITE_DATETIME_TABLE)
+                            + " VALUES (800, '2026-08-14 00:00:00', "
+                            + "'2026-08-14 00:00:00.123456', '2026-08-14 00:00:00.123456')")
+                    .collectAsList())
+        .hasMessageContaining("precision-specific format")
+        .hasMessageNotContaining("2026-08-14");
+    assertThat(jdbcRows("SELECT COUNT(*) FROM `" + SCHEMA + "`.`" + WRITE_DATETIME_TABLE + "`"))
+        .containsExactly("10");
+    assertThat(
+            jdbcRows(
+                "SELECT id, dt0, dt3, dt6 FROM `"
+                    + SCHEMA
+                    + "`.`"
+                    + WRITE_DATETIME_TABLE
+                    + "` WHERE id >= 801 ORDER BY id"))
+        .containsExactlyElementsOf(timestampExpected);
+  }
+
+  @Test
+  @Order(37)
+  void deniesTruncateWhenTheVendedDorisAccountLacksLoadPrivilege() throws Exception {
+    try (Connection connection =
+            DriverManager.getConnection(
+                doris.hostJdbcUrl(), DorisTestCluster.TEST_USER, DorisTestCluster.TEST_PASSWORD);
+        Statement statement = connection.createStatement()) {
+      statement.executeUpdate(
+          "INSERT INTO `"
+              + SCHEMA
+              + "`.`"
+              + WRITE_DORIS_DENIED_TABLE
+              + "` VALUES (450, 'preserved', NULL, 1.000)");
+    }
+
+    assertThatThrownBy(
+            () ->
+                spark
+                    .sql(
+                        "INSERT OVERWRITE "
+                            + qualified(DORIS_TRUNCATE_DENIAL_CATALOG, WRITE_DORIS_DENIED_TABLE)
+                            + " VALUES (451, 'blocked', NULL, 2.000)")
+                    .collectAsList())
+        .hasMessageNotContaining(DorisTestCluster.READ_ONLY_PASSWORD)
+        .hasMessageNotContaining(DorisTestCluster.TEST_PASSWORD);
+    assertThat(
+            jdbcRows(
+                "SELECT id FROM `" + SCHEMA + "`.`" + WRITE_DORIS_DENIED_TABLE + "` ORDER BY id"))
+        .containsExactly("450");
+  }
+
+  @Test
+  @Order(38)
+  void documentsNonAtomicTruncateWhenTheSubsequentLoadFails() throws Exception {
+    String oversizedLabel = "y".repeat(65);
+    assertThatThrownBy(
+            () ->
+                spark
+                    .sql(
+                        "INSERT OVERWRITE "
+                            + qualified(TRUNCATE_WRITE_CATALOG, WRITE_TRUNCATE_TABLE)
+                            + " VALUES (203, '"
+                            + oversizedLabel
+                            + "', NULL, 3.000)")
+                    .collectAsList())
+        .hasMessageNotContaining(oversizedLabel)
+        .hasMessageNotContaining(DorisTestCluster.LOAD_PASSWORD);
+    assertThat(jdbcRows("SELECT id FROM `" + SCHEMA + "`.`" + WRITE_TRUNCATE_TABLE + "`"))
+        .isEmpty();
   }
 
   @Test
@@ -1247,6 +1712,28 @@ public class GovernedDorisConnectorIT {
       createSimpleTable(statement, FAILURE_TABLE);
       createSimpleTable(statement, DRIFT_TABLE);
       createSimpleTable(statement, DENIED_TABLE);
+      createWriteTable(statement, WRITE_APPEND_TABLE);
+      createWriteTable(statement, WRITE_TRUNCATE_TABLE);
+      createWriteTable(statement, WRITE_DENIED_TABLE);
+      createWriteTable(statement, WRITE_DORIS_DENIED_TABLE);
+      createWriteTable(statement, WRITE_BULK_TABLE);
+      createWriteTable(statement, WRITE_FAILURE_TABLE);
+      statement.execute(
+          "CREATE TABLE `"
+              + SCHEMA
+              + "`.`"
+              + WRITE_DATETIME_TABLE
+              + "` (id INT NOT NULL, dt0 DATETIME, dt3 DATETIME(3), dt6 DATETIME(6)) "
+              + "DUPLICATE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 2 "
+              + "PROPERTIES ('replication_num'='1')");
+      statement.execute(
+          "GRANT SELECT_PRIV, LOAD_PRIV ON `"
+              + SCHEMA
+              + "`.* TO '"
+              + DorisTestCluster.LOAD_USER
+              + "'");
+      statement.execute(
+          "GRANT SELECT_PRIV ON `" + SCHEMA + "`.* TO '" + DorisTestCluster.READ_ONLY_USER + "'");
       statement.executeUpdate("INSERT INTO `" + SCHEMA + "`.`" + CACHE_TABLE + "` VALUES (1)");
       statement.executeUpdate("INSERT INTO `" + SCHEMA + "`.`" + FAILURE_TABLE + "` VALUES (1)");
       statement.executeUpdate("INSERT INTO `" + SCHEMA + "`.`" + DRIFT_TABLE + "` VALUES (1)");
@@ -1347,6 +1834,63 @@ public class GovernedDorisConnectorIT {
                 false,
                 tcpProxy.jdbcUrl(RecordingDorisTcpProxy.Lane.CONTROL)
                     + "?sslMode=VERIFY_IDENTITY"));
+    Catalog arrowCatalog =
+        metalake.createCatalog(
+            ARROW_CATALOG,
+            Catalog.Type.RELATIONAL,
+            PROVIDER,
+            "Governed Doris Arrow Flight SQL catalog",
+            arrowCatalogProperties(RecordingDorisTcpProxy.Lane.FLIGHT));
+    Catalog arrowFallbackCatalog =
+        metalake.createCatalog(
+            ARROW_FALLBACK_CATALOG,
+            Catalog.Type.RELATIONAL,
+            PROVIDER,
+            "Governed Doris Arrow fallback catalog",
+            arrowCatalogProperties(RecordingDorisTcpProxy.Lane.FLIGHT_FAILURE));
+    Catalog writeCatalog =
+        metalake.createCatalog(
+            WRITE_CATALOG,
+            Catalog.Type.RELATIONAL,
+            PROVIDER,
+            "Governed Doris batch append catalog",
+            writeCatalogProperties(
+                false, false, DorisTestCluster.LOAD_USER, DorisTestCluster.LOAD_PASSWORD));
+    Catalog truncateWriteCatalog =
+        metalake.createCatalog(
+            TRUNCATE_WRITE_CATALOG,
+            Catalog.Type.RELATIONAL,
+            PROVIDER,
+            "Governed Doris truncate overwrite catalog",
+            writeCatalogProperties(
+                true, false, DorisTestCluster.LOAD_USER, DorisTestCluster.LOAD_PASSWORD));
+    Catalog writeDenialCatalog =
+        metalake.createCatalog(
+            WRITE_DENIAL_CATALOG,
+            Catalog.Type.RELATIONAL,
+            PROVIDER,
+            "Governed Doris modify denial catalog",
+            writeCatalogProperties(
+                false, true, DorisTestCluster.TEST_USER, DorisTestCluster.TEST_PASSWORD));
+    Catalog dorisWriteDenialCatalog =
+        metalake.createCatalog(
+            DORIS_WRITE_DENIAL_CATALOG,
+            Catalog.Type.RELATIONAL,
+            PROVIDER,
+            "Governed Doris LOAD privilege denial catalog",
+            writeCatalogProperties(
+                false,
+                false,
+                DorisTestCluster.READ_ONLY_USER,
+                DorisTestCluster.READ_ONLY_PASSWORD));
+    Catalog dorisTruncateDenialCatalog =
+        metalake.createCatalog(
+            DORIS_TRUNCATE_DENIAL_CATALOG,
+            Catalog.Type.RELATIONAL,
+            PROVIDER,
+            "Governed Doris truncate LOAD privilege denial catalog",
+            writeCatalogProperties(
+                true, false, DorisTestCluster.READ_ONLY_USER, DorisTestCluster.READ_ONLY_PASSWORD));
     metalake.createCatalog(
         DIRECT_DENIAL_CATALOG,
         Catalog.Type.RELATIONAL,
@@ -1373,6 +1917,13 @@ public class GovernedDorisConnectorIT {
     strictPartitionedCatalog.asSchemas().loadSchema(SCHEMA);
     recorderControlCatalog.asSchemas().loadSchema(SCHEMA);
     strictRecorderControlCatalog.asSchemas().loadSchema(SCHEMA);
+    arrowCatalog.asSchemas().loadSchema(SCHEMA);
+    arrowFallbackCatalog.asSchemas().loadSchema(SCHEMA);
+    writeCatalog.asSchemas().loadSchema(SCHEMA);
+    truncateWriteCatalog.asSchemas().loadSchema(SCHEMA);
+    writeDenialCatalog.asSchemas().loadSchema(SCHEMA);
+    dorisWriteDenialCatalog.asSchemas().loadSchema(SCHEMA);
+    dorisTruncateDenialCatalog.asSchemas().loadSchema(SCHEMA);
 
     List<String> mainTables =
         new ArrayList<>(
@@ -1413,6 +1964,22 @@ public class GovernedDorisConnectorIT {
     strictRecorderControlCatalog
         .asTableCatalog()
         .loadTable(NameIdentifier.of(SCHEMA, COMMON_TABLE));
+    arrowCatalog.asTableCatalog().loadTable(NameIdentifier.of(SCHEMA, COMMON_TABLE));
+    arrowFallbackCatalog.asTableCatalog().loadTable(NameIdentifier.of(SCHEMA, COMMON_TABLE));
+    writeCatalog.asTableCatalog().loadTable(NameIdentifier.of(SCHEMA, WRITE_APPEND_TABLE));
+    writeCatalog.asTableCatalog().loadTable(NameIdentifier.of(SCHEMA, WRITE_BULK_TABLE));
+    writeCatalog.asTableCatalog().loadTable(NameIdentifier.of(SCHEMA, WRITE_FAILURE_TABLE));
+    writeCatalog.asTableCatalog().loadTable(NameIdentifier.of(SCHEMA, WRITE_DATETIME_TABLE));
+    truncateWriteCatalog
+        .asTableCatalog()
+        .loadTable(NameIdentifier.of(SCHEMA, WRITE_TRUNCATE_TABLE));
+    writeDenialCatalog.asTableCatalog().loadTable(NameIdentifier.of(SCHEMA, WRITE_DENIED_TABLE));
+    dorisWriteDenialCatalog
+        .asTableCatalog()
+        .loadTable(NameIdentifier.of(SCHEMA, WRITE_DORIS_DENIED_TABLE));
+    dorisTruncateDenialCatalog
+        .asTableCatalog()
+        .loadTable(NameIdentifier.of(SCHEMA, WRITE_DORIS_DENIED_TABLE));
 
     metalake.addUser(READER);
     List<SecurableObject> grants = new ArrayList<>();
@@ -1427,6 +1994,20 @@ public class GovernedDorisConnectorIT {
     addReadGrants(grants, DIRECT_DENIAL_CATALOG, Collections.emptyList(), null);
     addReadGrants(grants, SQL_DENIAL_CATALOG, Collections.emptyList(), null);
     addReadGrants(grants, STRICT_DENIAL_CATALOG, Collections.emptyList(), null);
+    addReadGrants(grants, ARROW_CATALOG, Collections.singletonList(COMMON_TABLE), null);
+    addReadGrants(grants, ARROW_FALLBACK_CATALOG, Collections.singletonList(COMMON_TABLE), null);
+    addWriteGrants(
+        grants,
+        WRITE_CATALOG,
+        Arrays.asList(
+            WRITE_APPEND_TABLE, WRITE_BULK_TABLE, WRITE_FAILURE_TABLE, WRITE_DATETIME_TABLE));
+    addWriteGrants(grants, TRUNCATE_WRITE_CATALOG, Collections.singletonList(WRITE_TRUNCATE_TABLE));
+    addReadGrants(
+        grants, WRITE_DENIAL_CATALOG, Collections.singletonList(WRITE_DENIED_TABLE), null);
+    addWriteGrants(
+        grants, DORIS_WRITE_DENIAL_CATALOG, Collections.singletonList(WRITE_DORIS_DENIED_TABLE));
+    addWriteGrants(
+        grants, DORIS_TRUNCATE_DENIAL_CATALOG, Collections.singletonList(WRITE_DORIS_DENIED_TABLE));
     metalake.createRole(READER_ROLE, new HashMap<>(), grants);
     metalake.grantRolesToUser(ImmutableList.of(READER_ROLE), READER);
   }
@@ -1473,6 +2054,31 @@ public class GovernedDorisConnectorIT {
   private Map<String, String> recordingCatalogProperties(RecordingDorisTcpProxy.Lane lane) {
     Map<String, String> properties = catalogProperties(false, tcpProxy.jdbcUrl(lane));
     properties.put("gravitino.bypass.maxIdle", "0");
+    return properties;
+  }
+
+  private Map<String, String> arrowCatalogProperties(RecordingDorisTcpProxy.Lane flightLane) {
+    Map<String, String> properties = catalogProperties(false);
+    properties.put("doris-fenodes", tcpProxy.feEndpoint());
+    properties.put("doris-arrow-flight-sql-mode", "preferred");
+    properties.put(
+        "doris-arrow-flight-sql-port", Integer.toString(tcpProxy.flightPort(flightLane)));
+    return properties;
+  }
+
+  private Map<String, String> writeCatalogProperties(
+      boolean truncate, boolean recordIo, String user, String password) {
+    Map<String, String> properties =
+        recordIo
+            ? catalogProperties(false, tcpProxy.jdbcUrl(RecordingDorisTcpProxy.Lane.DENIAL))
+            : catalogProperties(false);
+    properties.put("jdbc-user", user);
+    properties.put("jdbc-password", password);
+    if (recordIo) {
+      properties.put("gravitino.bypass.maxIdle", "0");
+    }
+    properties.put("doris-write-mode", "batch");
+    properties.put("doris-write-overwrite-mode", truncate ? "truncate" : "reject");
     return properties;
   }
 
@@ -1610,6 +2216,32 @@ public class GovernedDorisConnectorIT {
     assertThat(spark.sparkContext().sparkUser()).isEqualTo(READER);
   }
 
+  private static List<String> arrowCircuitPropertyKeys() {
+    return System.getProperties().stringPropertyNames().stream()
+        .filter(property -> property.startsWith(ARROW_CIRCUIT_PROPERTY_PREFIX))
+        .sorted()
+        .collect(Collectors.toList());
+  }
+
+  private static long arrowAttemptCount() {
+    return System.getProperties().stringPropertyNames().stream()
+        .filter(property -> property.startsWith(ARROW_ATTEMPT_PROPERTY_PREFIX))
+        .mapToLong(property -> Long.parseLong(System.getProperty(property)))
+        .sum();
+  }
+
+  private long awaitSettledAcceptedConnections(RecordingDorisTcpProxy.Lane lane) {
+    await()
+        .atMost(Duration.ofSeconds(5))
+        .untilAsserted(
+            () -> {
+              RecordingDorisTcpProxy.State state = tcpProxy.state(lane);
+              assertThat(state.accepted()).isPositive();
+              assertThat(state.active()).isZero();
+            });
+    return tcpProxy.state(lane).accepted();
+  }
+
   private org.apache.spark.sql.connector.catalog.TableCatalog sparkCatalog(String name) {
     return sparkCatalog(spark, name);
   }
@@ -1657,6 +2289,67 @@ public class GovernedDorisConnectorIT {
                 SecurableObjects.ofTable(
                     schema, name, ImmutableList.of(Privileges.SelectTable.allow())))
         .forEach(grants::add);
+  }
+
+  private static void addWriteGrants(
+      List<SecurableObject> grants, String catalogName, List<String> tableNames) {
+    SecurableObject catalog =
+        SecurableObjects.ofCatalog(catalogName, ImmutableList.of(Privileges.UseCatalog.allow()));
+    SecurableObject schema =
+        SecurableObjects.ofSchema(catalog, SCHEMA, ImmutableList.of(Privileges.UseSchema.allow()));
+    grants.add(catalog);
+    grants.add(schema);
+    tableNames.stream()
+        .map(
+            tableName ->
+                SecurableObjects.ofTable(
+                    schema,
+                    tableName,
+                    ImmutableList.of(
+                        Privileges.SelectTable.allow(), Privileges.ModifyTable.allow())))
+        .forEach(grants::add);
+  }
+
+  private void insertDatetimeRows(String timezone, int firstId) {
+    spark.conf().set("spark.sql.session.timeZone", timezone);
+    spark
+        .sql(
+            "INSERT INTO "
+                + qualified(WRITE_CATALOG, WRITE_DATETIME_TABLE)
+                + " VALUES "
+                + "("
+                + firstId
+                + ", '1969-12-31 23:59:59', '1969-12-31 23:59:59.001', "
+                + "'1969-12-31 23:59:59.000001'), "
+                + "("
+                + (firstId + 1)
+                + ", '2024-02-29 12:34:56', '2024-02-29 12:34:56.123', "
+                + "'2024-02-29 12:34:56.123456'), "
+                + "("
+                + (firstId + 2)
+                + ", '2024-03-10 02:30:00', '2024-11-03 01:30:00.999', "
+                + "'2024-11-03 01:30:00.999999'), "
+                + "("
+                + (firstId + 3)
+                + ", NULL, NULL, NULL)")
+        .collectAsList();
+  }
+
+  private List<String> insertTimestampDatetimeRow(String timezone, int id) throws Exception {
+    spark.conf().set("spark.sql.session.timeZone", timezone);
+    Dataset<Row> input =
+        spark.sql(
+            "SELECT "
+                + id
+                + " AS id, CAST('1969-12-31 23:59:59' AS TIMESTAMP) AS dt0, "
+                + "CAST('2024-11-03 01:30:00.999' AS TIMESTAMP) AS dt3, "
+                + "CAST('2024-03-10 01:59:59.999999' AS TIMESTAMP) AS dt6");
+    List<String> expected =
+        sparkRows(
+            input.selectExpr(
+                "id", "CAST(dt0 AS STRING)", "CAST(dt3 AS STRING)", "CAST(dt6 AS STRING)"));
+    input.writeTo(qualified(WRITE_CATALOG, WRITE_DATETIME_TABLE)).append();
+    return expected;
   }
 
   private void assertTypeContractProbe(TypeContractProbe probe) throws Exception {
@@ -1956,6 +2649,30 @@ public class GovernedDorisConnectorIT {
             + table
             + "` (id INT NOT NULL) DUPLICATE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1 "
             + "PROPERTIES ('replication_num'='1')");
+  }
+
+  private static void createWriteTable(Statement statement, String table) throws Exception {
+    statement.execute(
+        "CREATE TABLE `"
+            + SCHEMA
+            + "`.`"
+            + table
+            + "` (id INT NOT NULL, label VARCHAR(64), event_time DATETIME(6), "
+            + "amount DECIMAL(18,3)) DUPLICATE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 2 "
+            + "PROPERTIES ('replication_num'='1')");
+  }
+
+  private void assertTcpLaneRemainsZero(RecordingDorisTcpProxy.Lane lane, long generation) {
+    await()
+        .during(Duration.ofSeconds(1))
+        .atMost(Duration.ofSeconds(3))
+        .untilAsserted(
+            () -> {
+              RecordingDorisTcpProxy.State state = tcpProxy.state(lane);
+              assertThat(state.generation()).isEqualTo(generation);
+              assertThat(state.accepted()).isZero();
+              assertThat(state.active()).isZero();
+            });
   }
 
   private void createTypeContractProbe(Statement statement, TypeContractProbe probe) {

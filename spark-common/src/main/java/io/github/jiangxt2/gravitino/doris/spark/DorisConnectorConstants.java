@@ -44,6 +44,27 @@ public final class DorisConnectorConstants {
   public static final String DORIS_USER = "doris.user";
   public static final String DORIS_PASSWORD = "doris.password";
 
+  public static final String ARROW_FLIGHT_SQL_MODE = "doris-arrow-flight-sql-mode";
+  public static final String ARROW_FLIGHT_SQL_PORT = "doris-arrow-flight-sql-port";
+  public static final String ARROW_DISABLED = "disabled";
+  public static final String ARROW_PREFERRED = "preferred";
+  public static final String DORIS_READ_MODE = "doris.read.mode";
+  public static final String DORIS_ARROW_FLIGHT_SQL_PORT = "doris.read.arrow-flight-sql.port";
+  public static final String DORIS_FE_AUTO_FETCH = "doris.fe.auto.fetch";
+
+  public static final String WRITE_MODE = "doris-write-mode";
+  public static final String WRITE_DISABLED = "disabled";
+  public static final String WRITE_BATCH = "batch";
+  public static final String WRITE_OVERWRITE_MODE = "doris-write-overwrite-mode";
+  public static final String WRITE_OVERWRITE_REJECT = "reject";
+  public static final String WRITE_OVERWRITE_TRUNCATE = "truncate";
+  public static final String DORIS_SINK_MODE = "doris.sink.mode";
+  public static final String DORIS_SINK_AUTO_REDIRECT = "doris.sink.auto-redirect";
+  public static final String DORIS_SINK_ENABLE_2PC = "doris.sink.enable-2pc";
+  public static final String DORIS_SINK_STRICT_MODE = "doris.sink.properties.strict_mode";
+  public static final String DORIS_MAX_FILTER_RATIO = "doris.max.filter.ratio";
+  public static final String DORIS_WRITE_SCHEMALESS = "doris.write.schemaless";
+
   public static final String JDBC_PARTITION_COLUMN = "doris-jdbc-partition-column";
   public static final String JDBC_LOWER_BOUND = "doris-jdbc-lower-bound";
   public static final String JDBC_UPPER_BOUND = "doris-jdbc-upper-bound";

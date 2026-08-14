@@ -21,6 +21,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import org.apache.doris.spark.config.DorisConfig;
 import org.apache.spark.sql.connector.expressions.Expression;
 import org.apache.spark.sql.connector.expressions.NamedReference;
 import org.apache.spark.sql.connector.expressions.SortOrder;
@@ -58,6 +59,10 @@ final class DorisHybridScanBuilder35
   private final SupportsPushDownTopN sqlTopN;
   private final SupportsPushDownOffset sqlOffset;
   private final Set<String> normalizedColumns;
+  private final DorisConfig dorisConfig;
+  private final boolean arrowPreferred;
+  private final String endpointIdentity;
+  private final List<String> frontendHosts;
 
   private boolean normalizationRequiresSql;
   private boolean sqlOperatorSelected;
@@ -65,7 +70,8 @@ final class DorisHybridScanBuilder35
   private Predicate[] commonPushedPredicates = new Predicate[0];
 
   DorisHybridScanBuilder35(ScanBuilder nativeBuilder, ScanBuilder sqlBuilder, boolean sqlRequired) {
-    this(nativeBuilder, sqlBuilder, sqlRequired, Collections.emptySet());
+    this(
+        nativeBuilder, sqlBuilder, sqlRequired, Collections.emptySet(), null, false, "", List.of());
   }
 
   DorisHybridScanBuilder35(
@@ -73,6 +79,18 @@ final class DorisHybridScanBuilder35
       ScanBuilder sqlBuilder,
       boolean sqlRequired,
       Set<String> normalizedColumns) {
+    this(nativeBuilder, sqlBuilder, sqlRequired, normalizedColumns, null, false, "", List.of());
+  }
+
+  DorisHybridScanBuilder35(
+      ScanBuilder nativeBuilder,
+      ScanBuilder sqlBuilder,
+      boolean sqlRequired,
+      Set<String> normalizedColumns,
+      DorisConfig dorisConfig,
+      boolean arrowPreferred,
+      String endpointIdentity,
+      List<String> frontendHosts) {
     validateSqlBuilder(sqlBuilder);
     if (nativeBuilder != null) {
       validateNativeBuilder(nativeBuilder);
@@ -93,11 +111,21 @@ final class DorisHybridScanBuilder35
     normalizedColumns.forEach(
         column -> this.normalizedColumns.add(column.toLowerCase(Locale.ROOT)));
     this.normalizationRequiresSql = sqlRequired;
+    this.dorisConfig = dorisConfig;
+    this.arrowPreferred = arrowPreferred;
+    this.endpointIdentity = endpointIdentity;
+    this.frontendHosts = List.copyOf(frontendHosts);
   }
 
   @Override
   public Scan build() {
-    return selectedBuilder().build();
+    ScanBuilder selected = selectedBuilder();
+    Scan scan = selected.build();
+    if (selected == nativeBuilder && arrowPreferred) {
+      DorisChecks.checkState(dorisConfig != null, "Doris Arrow configuration is missing");
+      return new DorisArrowFallbackScan35(scan, dorisConfig, endpointIdentity, frontendHosts);
+    }
+    return scan;
   }
 
   @Override

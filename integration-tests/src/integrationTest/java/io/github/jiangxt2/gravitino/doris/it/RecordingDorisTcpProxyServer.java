@@ -24,7 +24,10 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
 import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
 import java.util.Locale;
+import java.util.Map;
+import java.util.StringTokenizer;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -38,24 +41,40 @@ public final class RecordingDorisTcpProxyServer {
   private RecordingDorisTcpProxyServer() {}
 
   /**
-   * Starts two independently counted TCP listeners and a numeric-only control endpoint.
+   * Starts independently counted JDBC, HTTP, and Flight listeners plus a numeric-only control
+   * endpoint.
    *
-   * @param args target host, target port, control listener port, denial listener port, admin port
+   * @param args target host; query, HTTP, and Flight target ports; five listener ports; admin port
    * @throws Exception if the proxy cannot start
    */
   public static void main(String[] args) throws Exception {
-    if (args.length != 5) {
-      throw new IllegalArgumentException("Expected target host and four numeric ports");
+    if (args.length != 10) {
+      throw new IllegalArgumentException("Expected target host and nine numeric ports");
     }
     String targetHost = args[0];
-    int targetPort = parsePort(args[1]);
-    int controlPort = parsePort(args[2]);
-    int denialPort = parsePort(args[3]);
-    int adminPort = parsePort(args[4]);
+    int queryTargetPort = parsePort(args[1]);
+    int httpTargetPort = parsePort(args[2]);
+    int flightTargetPort = parsePort(args[3]);
+    int controlPort = parsePort(args[4]);
+    int denialPort = parsePort(args[5]);
+    int httpPort = parsePort(args[6]);
+    int flightPort = parsePort(args[7]);
+    int flightFailurePort = parsePort(args[8]);
+    int adminPort = parsePort(args[9]);
 
     CountDownLatch stopped = new CountDownLatch(1);
     ProxyRuntime runtime =
-        new ProxyRuntime(targetHost, targetPort, controlPort, denialPort, adminPort);
+        new ProxyRuntime(
+            targetHost,
+            queryTargetPort,
+            httpTargetPort,
+            flightTargetPort,
+            controlPort,
+            denialPort,
+            httpPort,
+            flightPort,
+            flightFailurePort,
+            adminPort);
     Runtime.getRuntime()
         .addShutdownHook(
             new Thread(
@@ -83,25 +102,45 @@ public final class RecordingDorisTcpProxyServer {
   private static final class ProxyRuntime implements AutoCloseable {
 
     private final ExecutorService executor = Executors.newCachedThreadPool();
-    private final ProxyLane control;
-    private final ProxyLane denial;
+    private final Map<String, ProxyLane> lanes = new LinkedHashMap<>();
     private final HttpServer admin;
 
     private ProxyRuntime(
-        String targetHost, int targetPort, int controlPort, int denialPort, int adminPort)
+        String targetHost,
+        int queryTargetPort,
+        int httpTargetPort,
+        int flightTargetPort,
+        int controlPort,
+        int denialPort,
+        int httpPort,
+        int flightPort,
+        int flightFailurePort,
+        int adminPort)
         throws IOException {
-      control = new ProxyLane("control", controlPort, targetHost, targetPort, executor);
-      denial = new ProxyLane("denial", denialPort, targetHost, targetPort, executor);
+      lanes.put(
+          "control", new ProxyLane("control", controlPort, targetHost, queryTargetPort, executor));
+      lanes.put(
+          "denial", new ProxyLane("denial", denialPort, targetHost, queryTargetPort, executor));
+      lanes.put(
+          "fe-http", new ProxyLane("fe-http", httpPort, targetHost, httpTargetPort, executor));
+      lanes.put(
+          "flight", new ProxyLane("flight", flightPort, targetHost, flightTargetPort, executor));
+      // Port 1 has no Doris listener. The proxy accepts the probe and ADBC sockets, then closes
+      // each connection when its upstream connect fails.
+      lanes.put(
+          "flight-failure",
+          new ProxyLane(
+              "flight-failure", flightFailurePort, targetHost, 1, flightTargetPort, executor));
       admin = HttpServer.create(new InetSocketAddress(adminPort), 0);
       admin.setExecutor(executor);
       admin.createContext("/health", this::health);
       admin.createContext("/state", this::state);
       admin.createContext("/reset", this::reset);
+      admin.createContext("/availability", this::availability);
     }
 
     private void start() {
-      control.start();
-      denial.start();
+      lanes.values().forEach(ProxyLane::start);
       admin.start();
     }
 
@@ -140,13 +179,41 @@ public final class RecordingDorisTcpProxyServer {
       respond(exchange, state == null ? 409 : 200, state == null ? "connections-active" : state);
     }
 
-    private ProxyLane lane(HttpExchange exchange) {
-      String query = exchange.getRequestURI().getRawQuery();
-      if ("lane=control".equals(query)) {
-        return control;
+    private void availability(HttpExchange exchange) throws IOException {
+      if (!"POST".equals(exchange.getRequestMethod())) {
+        respond(exchange, 405, "method-not-allowed");
+        return;
       }
-      if ("lane=denial".equals(query)) {
-        return denial;
+      ProxyLane lane = lane(exchange);
+      String available = queryParameter(exchange, "available");
+      if (lane == null || !"flight-failure".equals(lane.name)) {
+        respond(exchange, 400, "unknown-lane");
+        return;
+      }
+      if (!"true".equals(available) && !"false".equals(available)) {
+        respond(exchange, 400, "invalid-availability");
+        return;
+      }
+      String state = lane.setAvailable(Boolean.parseBoolean(available));
+      respond(exchange, state == null ? 409 : 200, state == null ? "connections-active" : state);
+    }
+
+    private ProxyLane lane(HttpExchange exchange) {
+      return lanes.get(queryParameter(exchange, "lane"));
+    }
+
+    private static String queryParameter(HttpExchange exchange, String name) {
+      String query = exchange.getRequestURI().getRawQuery();
+      if (query == null) {
+        return null;
+      }
+      StringTokenizer parameters = new StringTokenizer(query, "&");
+      while (parameters.hasMoreTokens()) {
+        String parameter = parameters.nextToken();
+        int separator = parameter.indexOf('=');
+        if (separator > 0 && name.equals(parameter.substring(0, separator))) {
+          return parameter.substring(separator + 1);
+        }
       }
       return null;
     }
@@ -154,8 +221,7 @@ public final class RecordingDorisTcpProxyServer {
     @Override
     public void close() {
       admin.stop(0);
-      control.close();
-      denial.close();
+      lanes.values().forEach(ProxyLane::close);
       executor.shutdownNow();
     }
 
@@ -177,9 +243,11 @@ public final class RecordingDorisTcpProxyServer {
     private final Object stateLock = new Object();
     private final String name;
     private final String targetHost;
-    private final int targetPort;
+    private final int unavailableTargetPort;
+    private final int availableTargetPort;
     private final ExecutorService executor;
     private final ServerSocket listener;
+    private volatile int targetPort;
     private long accepted;
     private int active;
     private long generation;
@@ -187,9 +255,22 @@ public final class RecordingDorisTcpProxyServer {
     private ProxyLane(
         String name, int listenPort, String targetHost, int targetPort, ExecutorService executor)
         throws IOException {
+      this(name, listenPort, targetHost, targetPort, targetPort, executor);
+    }
+
+    private ProxyLane(
+        String name,
+        int listenPort,
+        String targetHost,
+        int unavailableTargetPort,
+        int availableTargetPort,
+        ExecutorService executor)
+        throws IOException {
       this.name = name;
       this.targetHost = targetHost;
-      this.targetPort = targetPort;
+      this.unavailableTargetPort = unavailableTargetPort;
+      this.availableTargetPort = availableTargetPort;
+      this.targetPort = unavailableTargetPort;
       this.executor = executor;
       listener = new ServerSocket();
       listener.bind(new InetSocketAddress("0.0.0.0", listenPort));
@@ -249,6 +330,16 @@ public final class RecordingDorisTcpProxyServer {
         }
         accepted = 0;
         generation++;
+        return formatState();
+      }
+    }
+
+    private String setAvailable(boolean available) {
+      synchronized (stateLock) {
+        if (active != 0) {
+          return null;
+        }
+        targetPort = available ? availableTargetPort : unavailableTargetPort;
         return formatState();
       }
     }

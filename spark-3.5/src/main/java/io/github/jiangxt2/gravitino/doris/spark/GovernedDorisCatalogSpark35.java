@@ -25,7 +25,7 @@ import org.apache.spark.sql.connector.catalog.Table;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.apache.spark.sql.types.StructType;
 
-/** Spark 3.5 implementation of the governed, read-only Doris Spark catalog. */
+/** Spark 3.5 implementation of the governed Doris Spark catalog. */
 public class GovernedDorisCatalogSpark35 extends GovernedDorisCatalog {
 
   @Override
@@ -109,7 +109,8 @@ public class GovernedDorisCatalogSpark35 extends GovernedDorisCatalog {
       StructType validatedSchema,
       PropertiesConverter propertiesConverter,
       SparkTransformConverter sparkTransformConverter,
-      SparkTypeConverter sparkTypeConverter) {
+      SparkTypeConverter sparkTypeConverter,
+      DorisCapabilityPolicy tableCapabilityPolicy) {
     return new GovernedDorisTable35(
         identifier,
         gravitinoTable,
@@ -118,7 +119,18 @@ public class GovernedDorisCatalogSpark35 extends GovernedDorisCatalog {
         propertiesConverter,
         sparkTransformConverter,
         sparkTypeConverter,
-        getCapabilityPolicy());
+        tableCapabilityPolicy);
+  }
+
+  @Override
+  protected DorisWriteDelegateFactory getWriteDelegateFactory() {
+    return context -> {
+      DorisChecks.checkArgument(
+          context.readDelegate() instanceof DorisHybridTable35,
+          "Unexpected Doris hybrid table implementation: %s",
+          context.readDelegate().getClass().getName());
+      return ((DorisHybridTable35) context.readDelegate()).withGovernedWrite(context);
+    };
   }
 
   /**
@@ -130,9 +142,34 @@ public class GovernedDorisCatalogSpark35 extends GovernedDorisCatalog {
    */
   @SuppressWarnings({"rawtypes", "MissingOverride"})
   public Table loadTable(Identifier ident, Set writePrivileges) throws NoSuchTableException {
-    if (!getCapabilityPolicy().allowsTableWrites()) {
+    if (!DorisCatalogClassResolver.supportsWriteAwareLoad()
+        || !getCapabilityPolicy().allowsTableWrites()) {
       throw getCapabilityPolicy().reject("table writes");
     }
-    return loadTableForWriting(ident);
+    validateWritePrivileges(writePrivileges);
+    return loadTableForGovernedWrite(ident);
+  }
+
+  private void validateWritePrivileges(Set<?> writePrivileges) {
+    if (writePrivileges == null || writePrivileges.isEmpty()) {
+      throw getCapabilityPolicy().reject("an empty write privilege request");
+    }
+    java.util.Set<String> names = new java.util.HashSet<>();
+    for (Object privilege : writePrivileges) {
+      // An instanceof check would link the type that is absent from Spark 3.5.0 through 3.5.2.
+      if (!(privilege instanceof Enum)
+          || !"org.apache.spark.sql.connector.catalog.TableWritePrivilege"
+              .equals(privilege.getClass().getName())) {
+        throw getCapabilityPolicy().reject("an unknown write privilege");
+      }
+      names.add(((Enum<?>) privilege).name());
+    }
+    if (names.equals(java.util.Set.of("INSERT"))) {
+      return;
+    }
+    if (names.equals(java.util.Set.of("INSERT", "DELETE")) && getWritePolicy().allowsTruncate()) {
+      return;
+    }
+    throw getCapabilityPolicy().reject("the requested write privileges");
   }
 }

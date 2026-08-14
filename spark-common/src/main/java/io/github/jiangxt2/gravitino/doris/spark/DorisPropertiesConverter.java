@@ -45,6 +45,19 @@ public class DorisPropertiesConverter implements PropertiesConverter {
           DorisConnectorConstants.JDBC_USER,
           DorisConnectorConstants.JDBC_PASSWORD,
           DorisConnectorConstants.READ_TRANSPORT,
+          DorisConnectorConstants.ARROW_FLIGHT_SQL_MODE,
+          DorisConnectorConstants.ARROW_FLIGHT_SQL_PORT,
+          DorisConnectorConstants.WRITE_MODE,
+          DorisConnectorConstants.WRITE_OVERWRITE_MODE,
+          DorisConnectorConstants.DORIS_READ_MODE,
+          DorisConnectorConstants.DORIS_ARROW_FLIGHT_SQL_PORT,
+          DorisConnectorConstants.DORIS_FE_AUTO_FETCH,
+          DorisConnectorConstants.DORIS_SINK_MODE,
+          DorisConnectorConstants.DORIS_SINK_AUTO_REDIRECT,
+          DorisConnectorConstants.DORIS_SINK_ENABLE_2PC,
+          DorisConnectorConstants.DORIS_SINK_STRICT_MODE,
+          DorisConnectorConstants.DORIS_MAX_FILTER_RATIO,
+          DorisConnectorConstants.DORIS_WRITE_SCHEMALESS,
           "url",
           "driver",
           "user",
@@ -71,6 +84,10 @@ public class DorisPropertiesConverter implements PropertiesConverter {
           DorisConnectorConstants.JDBC_USER,
           DorisConnectorConstants.JDBC_PASSWORD,
           DorisConnectorConstants.READ_TRANSPORT,
+          DorisConnectorConstants.ARROW_FLIGHT_SQL_MODE,
+          DorisConnectorConstants.ARROW_FLIGHT_SQL_PORT,
+          DorisConnectorConstants.WRITE_MODE,
+          DorisConnectorConstants.WRITE_OVERWRITE_MODE,
           DorisConnectorConstants.GRAVITINO_DORIS_FE_NODES,
           DorisConnectorConstants.GRAVITINO_DORIS_QUERY_PORT,
           DorisConnectorConstants.DORIS_FE_NODES,
@@ -144,6 +161,10 @@ public class DorisPropertiesConverter implements PropertiesConverter {
     }
     validateNoCredentialBackfill(properties);
     DorisReadTransport readTransport = DorisReadTransport.from(properties);
+    String arrowMode =
+        io.github.jiangxt2.gravitino.doris.security.DorisJdbcSecurity.arrowFlightSqlMode(
+            properties);
+    DorisWritePolicy writePolicy = DorisWritePolicy.from(properties);
 
     Map<String, String> result = new HashMap<>();
     String feNodes = properties.get(DorisConnectorConstants.GRAVITINO_DORIS_FE_NODES);
@@ -160,6 +181,21 @@ public class DorisPropertiesConverter implements PropertiesConverter {
       throw new IllegalArgumentException(
           "Strict JDBC TLS transport must not configure native Doris endpoints");
     }
+    if (!readTransport.allowsNativeLane()) {
+      return result;
+    }
+
+    result.put(DorisConnectorConstants.DORIS_READ_MODE, "thrift");
+    result.put(DorisConnectorConstants.DORIS_FE_AUTO_FETCH, "false");
+    String arrowPort = properties.get(DorisConnectorConstants.ARROW_FLIGHT_SQL_PORT);
+    if (DorisConnectorConstants.ARROW_PREFERRED.equals(arrowMode)) {
+      validatePort(DorisConnectorConstants.ARROW_FLIGHT_SQL_PORT, arrowPort);
+      result.put(DorisConnectorConstants.DORIS_ARROW_FLIGHT_SQL_PORT, arrowPort);
+    } else if (arrowPort != null) {
+      throw new IllegalArgumentException(
+          "doris-arrow-flight-sql-port requires preferred Arrow mode");
+    }
+    result.putAll(writePolicy.forcedConnectorOptions());
     return result;
   }
 
@@ -220,7 +256,8 @@ public class DorisPropertiesConverter implements PropertiesConverter {
           if (!seen.add(canonicalKey)) {
             throw new IllegalArgumentException(source + " contains a duplicate Doris read option");
           }
-          if (PROTECTED_CONNECTOR_PROPERTIES.contains(canonicalKey)) {
+          if (PROTECTED_CONNECTOR_PROPERTIES.contains(canonicalKey)
+              || canonicalKey.startsWith("doris.sink.properties.")) {
             throw new IllegalArgumentException(
                 source + " must not override protected Doris connector options");
           }

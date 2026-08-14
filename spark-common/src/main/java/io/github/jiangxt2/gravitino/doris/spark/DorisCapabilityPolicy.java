@@ -46,6 +46,23 @@ public final class DorisCapabilityPolicy {
     return new DorisCapabilityPolicy(tableCapabilities);
   }
 
+  /** Returns the capabilities certified by the supplied write policy and Spark patch. */
+  public static DorisCapabilityPolicy from(DorisWritePolicy writePolicy) {
+    return from(writePolicy, DorisCatalogClassResolver.supportsWriteAwareLoad());
+  }
+
+  static DorisCapabilityPolicy from(DorisWritePolicy writePolicy, boolean writeAwareLoadSupported) {
+    if (!writePolicy.enabled() || !writeAwareLoadSupported) {
+      return readOnly();
+    }
+    java.util.EnumSet<TableCapability> capabilities =
+        java.util.EnumSet.of(TableCapability.BATCH_READ, TableCapability.BATCH_WRITE);
+    if (writePolicy.allowsTruncate()) {
+      capabilities.add(TableCapability.TRUNCATE);
+    }
+    return of(capabilities);
+  }
+
   /** Returns capabilities that may be exposed by the governed facade. */
   public Set<TableCapability> tableCapabilities() {
     return tableCapabilities;
@@ -60,6 +77,8 @@ public final class DorisCapabilityPolicy {
   /** Creates a consistent unsupported-operation error for future mutation seams. */
   public UnsupportedOperationException reject(String operation) {
     return new UnsupportedOperationException(
-        "The governed Doris connector is read-only and does not support " + operation);
+        "The governed Doris connector policy does not support "
+            + operation
+            + "; the requested operation remains read-only");
   }
 }

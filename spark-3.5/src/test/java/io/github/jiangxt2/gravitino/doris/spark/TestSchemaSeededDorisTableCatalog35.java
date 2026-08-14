@@ -54,6 +54,30 @@ public class TestSchemaSeededDorisTableCatalog35 {
   }
 
   @Test
+  void testManagedArrowConfigurationCreatesHybridTable() {
+    SchemaSeededDorisTableCatalog35 catalog = new SchemaSeededDorisTableCatalog35();
+    catalog.initialize(
+        "doris",
+        new CaseInsensitiveStringMap(
+            ImmutableMap.<String, String>builder()
+                .put(DorisConnectorConstants.DORIS_FE_NODES, "localhost:8030")
+                .put(DorisConnectorConstants.DORIS_QUERY_PORT, "9030")
+                .put(DorisConnectorConstants.DORIS_USER, "root")
+                .put(DorisConnectorConstants.DORIS_PASSWORD, "non-empty-test-password")
+                .put(DorisConnectorConstants.DORIS_READ_MODE, "thrift")
+                .put(DorisConnectorConstants.DORIS_FE_AUTO_FETCH, "false")
+                .put(DorisConnectorConstants.DORIS_ARROW_FLIGHT_SQL_PORT, "8070")
+                .build()));
+    Identifier identifier = Identifier.of(new String[] {"analytics"}, "events");
+    StructType schema = new StructType().add("id", DataTypes.IntegerType, true);
+
+    Table table =
+        catalog.loadTable(identifier, readSchema(schema), connectionInfo(), readOptions());
+
+    assertInstanceOf(DorisHybridTable35.class, table);
+  }
+
+  @Test
   void testRequiresExactlyOneSchema() {
     SchemaSeededDorisTableCatalog35 catalog = initializedCatalog();
     StructType schema = new StructType();

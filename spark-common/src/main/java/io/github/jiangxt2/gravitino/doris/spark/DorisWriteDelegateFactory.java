@@ -16,20 +16,19 @@ package io.github.jiangxt2.gravitino.doris.spark;
 
 import org.apache.spark.sql.connector.catalog.Table;
 
-/** Stable factory seam for a future governed batch or streaming write delegate. */
+/** Stable factory seam for a governed batch-write delegate. */
 @FunctionalInterface
 public interface DorisWriteDelegateFactory {
 
   /**
-   * Decorates an authorized read delegate with future governed write behavior.
+   * Decorates an authorized read delegate with governed write behavior.
    *
-   * <p>The initial factory returns the read delegate unchanged. A future implementation can use the
-   * original official Doris table and credential-vended connection material in the context without
-   * changing catalog registration, authorization ordering, or table construction.
+   * <p>A version adapter can use the original official Doris table only after the catalog has
+   * authorized both SELECT_TABLE and MODIFY_TABLE.
    */
   Table create(DorisAuthorizedTableContext context);
 
-  /** Returns the initial factory that deliberately exposes no write implementation. */
+  /** Returns a factory that deliberately exposes no write implementation. */
   static DorisWriteDelegateFactory readOnly() {
     return DorisAuthorizedTableContext::readDelegate;
   }

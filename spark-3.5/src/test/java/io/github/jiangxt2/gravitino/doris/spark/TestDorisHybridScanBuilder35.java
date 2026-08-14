@@ -24,6 +24,10 @@ import static org.mockito.Mockito.when;
 
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import org.apache.doris.spark.config.DorisConfig;
 import org.apache.spark.sql.connector.expressions.Expression;
 import org.apache.spark.sql.connector.expressions.Expressions;
 import org.apache.spark.sql.connector.expressions.NullOrdering;
@@ -225,9 +229,53 @@ public class TestDorisHybridScanBuilder35 {
     assertSame(nativeBuilder.scan, builder.build());
   }
 
+  @Test
+  void testArrowPreferredWrapsOnlyTheSelectedNativeLane() throws Exception {
+    RecordingNativeBuilder nativeBuilder = new RecordingNativeBuilder();
+    RecordingSqlBuilder sqlBuilder = new RecordingSqlBuilder();
+    DorisHybridScanBuilder35 nativeSelected =
+        new DorisHybridScanBuilder35(
+            nativeBuilder,
+            sqlBuilder,
+            false,
+            Collections.emptySet(),
+            arrowConfig(),
+            true,
+            "endpoint-identity",
+            List.of("fe"));
+
+    assertTrue(nativeSelected.build() instanceof DorisArrowFallbackScan35);
+
+    DorisHybridScanBuilder35 sqlSelected =
+        new DorisHybridScanBuilder35(
+            new RecordingNativeBuilder(),
+            sqlBuilder,
+            false,
+            Collections.emptySet(),
+            arrowConfig(),
+            true,
+            "endpoint-identity",
+            List.of("fe"));
+    assertTrue(sqlSelected.pushLimit(10));
+    assertSame(sqlBuilder.scan, sqlSelected.build());
+  }
+
   private static Predicate predicate(String name, String column, Object value) {
     return new Predicate(
         name, new Expression[] {Expressions.column(column), Expressions.literal(value)});
+  }
+
+  private static DorisConfig arrowConfig() throws Exception {
+    Map<String, String> options = new HashMap<>();
+    options.put("doris.fenodes", "fe:8030");
+    options.put("doris.query.port", "9030");
+    options.put("doris.user", "reader");
+    options.put("doris.password", "test-password");
+    options.put("doris.table.identifier", "analytics.events");
+    options.put("doris.read.mode", "thrift");
+    options.put("doris.read.arrow-flight-sql.port", "8070");
+    options.put("doris.fe.auto.fetch", "false");
+    return DorisConfig.fromMap(options, false);
   }
 
   private static class RecordingNativeBuilder

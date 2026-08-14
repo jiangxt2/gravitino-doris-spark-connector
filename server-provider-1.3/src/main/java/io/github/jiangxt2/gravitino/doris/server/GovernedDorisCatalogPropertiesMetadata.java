@@ -44,6 +44,30 @@ public final class GovernedDorisCatalogPropertiesMetadata extends JdbcCatalogPro
             optionalPort(
                 DorisJdbcSecurity.DORIS_QUERY_PORT,
                 "Doris FE MySQL query port required only by hybrid native planning"),
+            PropertyEntry.stringImmutablePropertyEntry(
+                DorisJdbcSecurity.ARROW_FLIGHT_SQL_MODE,
+                "Governed Arrow Flight SQL mode: disabled or preferred",
+                false,
+                DorisJdbcSecurity.ARROW_DISABLED,
+                false,
+                false),
+            optionalPort(
+                DorisJdbcSecurity.ARROW_FLIGHT_SQL_PORT,
+                "Catalog-managed Doris FE Arrow Flight SQL port"),
+            PropertyEntry.stringImmutablePropertyEntry(
+                DorisJdbcSecurity.WRITE_MODE,
+                "Governed Doris write mode: disabled or batch",
+                false,
+                DorisJdbcSecurity.WRITE_DISABLED,
+                false,
+                false),
+            PropertyEntry.stringImmutablePropertyEntry(
+                DorisJdbcSecurity.WRITE_OVERWRITE_MODE,
+                "Governed Doris overwrite mode: reject or truncate",
+                false,
+                DorisJdbcSecurity.WRITE_OVERWRITE_REJECT,
+                false,
+                false),
             optionalString(
                 "doris-jdbc-partition-column",
                 "Spark JDBC partition column for String-normalized detail scans"),

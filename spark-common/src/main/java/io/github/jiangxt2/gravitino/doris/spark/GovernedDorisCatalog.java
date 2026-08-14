@@ -41,7 +41,7 @@ import org.apache.spark.sql.util.CaseInsensitiveStringMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-/** A governed, read-only Spark catalog for native-compatible or strict JDBC Doris reads. */
+/** A governed Spark catalog for native-compatible or strict JDBC Doris access. */
 public abstract class GovernedDorisCatalog extends GravitinoJdbcCatalog {
 
   private static final Logger LOG = LoggerFactory.getLogger(GovernedDorisCatalog.class);
@@ -56,28 +56,45 @@ public abstract class GovernedDorisCatalog extends GravitinoJdbcCatalog {
   private DorisJdbcReadOptions jdbcReadOptions;
   private DorisPhysicalSchemaCache physicalSchemaCache;
   private DorisReadTransport readTransport;
-  private final DorisCapabilityPolicy defaultCapabilityPolicy = DorisCapabilityPolicy.readOnly();
+  private DorisWritePolicy writePolicy = DorisWritePolicy.disabled();
+  private DorisCapabilityPolicy capabilityPolicy = DorisCapabilityPolicy.readOnly();
   private final DorisCatalogMutationDelegate defaultMutationDelegate =
-      DorisCatalogMutationDelegate.readOnly(defaultCapabilityPolicy);
+      DorisCatalogMutationDelegate.readOnly(DorisCapabilityPolicy.readOnly());
   private final DorisWriteDelegateFactory defaultWriteDelegateFactory =
       DorisWriteDelegateFactory.readOnly();
 
   @Override
   public Table loadTable(Identifier ident) throws NoSuchTableException {
+    return loadAuthorizedTable(ident, Set.of(Privilege.Name.SELECT_TABLE), false);
+  }
+
+  /** Loads a write-capable table only after both read and modify authorization succeed. */
+  protected final Table loadTableForGovernedWrite(Identifier ident) throws NoSuchTableException {
+    if (!writePolicy.enabled() || !DorisCatalogClassResolver.supportsWriteAwareLoad()) {
+      throw capabilityPolicy.reject("table writes");
+    }
+    return loadAuthorizedTable(
+        ident, Set.of(Privilege.Name.SELECT_TABLE, Privilege.Name.MODIFY_TABLE), true);
+  }
+
+  private Table loadAuthorizedTable(
+      Identifier ident, Set<Privilege.Name> privileges, boolean writeAuthorized)
+      throws NoSuchTableException {
     org.apache.gravitino.rel.Table gravitinoTable;
     try {
       gravitinoTable =
           gravitinoCatalogClient
               .asTableCatalog()
-              .loadTable(
-                  NameIdentifier.of(getDatabase(ident), ident.name()),
-                  Set.of(Privilege.Name.SELECT_TABLE));
+              .loadTable(NameIdentifier.of(getDatabase(ident), ident.name()), privileges);
     } catch (org.apache.gravitino.exceptions.NoSuchTableException e) {
       throw new NoSuchTableException(ident);
     }
 
     // Authorization above is deliberately completed before any physical delegate is touched.
     if (readTransport == DorisReadTransport.STRICT_JDBC_TLS) {
+      if (writeAuthorized) {
+        throw new IllegalStateException("Strict JDBC TLS tables must remain read-only");
+      }
       return createStrictSparkTable(
           ident,
           gravitinoTable,
@@ -99,14 +116,25 @@ public abstract class GovernedDorisCatalog extends GravitinoJdbcCatalog {
               "Failed to create the physical Doris table for authorized table %s",
               qualifiedIdentifier(ident)));
     }
-    return createSparkTable(
+    if (!writeAuthorized) {
+      return createSparkTable(
+          ident,
+          gravitinoTable,
+          physicalTable,
+          sparkCatalog,
+          propertiesConverter,
+          sparkTransformConverter,
+          getSparkTypeConverter());
+    }
+    return createSparkTableAfterAuthorization(
         ident,
         gravitinoTable,
         physicalTable,
         sparkCatalog,
         propertiesConverter,
         sparkTransformConverter,
-        getSparkTypeConverter());
+        getSparkTypeConverter(),
+        true);
   }
 
   @Override
@@ -160,6 +188,8 @@ public abstract class GovernedDorisCatalog extends GravitinoJdbcCatalog {
       String name, CaseInsensitiveStringMap options, Map<String, String> properties) {
     DorisJdbcSecurity.validateServerCatalogProperties(properties);
     readTransport = DorisReadTransport.from(properties);
+    writePolicy = DorisWritePolicy.from(properties);
+    capabilityPolicy = DorisCapabilityPolicy.from(writePolicy);
     DorisJdbcSecurity.validateConnection(
         properties.get(DorisConnectorConstants.JDBC_URL),
         properties.get(DorisConnectorConstants.JDBC_DRIVER),
@@ -222,6 +252,26 @@ public abstract class GovernedDorisCatalog extends GravitinoJdbcCatalog {
       PropertiesConverter propertiesConverter,
       SparkTransformConverter sparkTransformConverter,
       SparkTypeConverter sparkTypeConverter) {
+    return createSparkTableAfterAuthorization(
+        identifier,
+        gravitinoTable,
+        sparkTable,
+        sparkCatalog,
+        propertiesConverter,
+        sparkTransformConverter,
+        sparkTypeConverter,
+        false);
+  }
+
+  private Table createSparkTableAfterAuthorization(
+      Identifier identifier,
+      org.apache.gravitino.rel.Table gravitinoTable,
+      Table sparkTable,
+      TableCatalog sparkCatalog,
+      PropertiesConverter propertiesConverter,
+      SparkTransformConverter sparkTransformConverter,
+      SparkTypeConverter sparkTypeConverter,
+      boolean writeAuthorized) {
     Supplier<DorisPhysicalSchema> physicalSchemaLoader =
         () -> loadPhysicalSchema(sparkCatalog, identifier, sparkTable);
     DorisReadSchema readSchema =
@@ -251,12 +301,14 @@ public abstract class GovernedDorisCatalog extends GravitinoJdbcCatalog {
             sparkCatalog,
             sparkTable,
             readDelegate,
-            readSchema.schema(),
+            readSchema,
             jdbcConnectionInfo,
-            jdbcReadOptions);
+            jdbcReadOptions,
+            writePolicy);
     Table tableDelegate;
     try {
-      tableDelegate = getWriteDelegateFactory().create(authorizedContext);
+      tableDelegate =
+          writeAuthorized ? getWriteDelegateFactory().create(authorizedContext) : readDelegate;
       if (tableDelegate == null) {
         throw new IllegalStateException("Doris table delegate factory returned null");
       }
@@ -275,7 +327,8 @@ public abstract class GovernedDorisCatalog extends GravitinoJdbcCatalog {
         readSchema.schema(),
         propertiesConverter,
         sparkTransformConverter,
-        sparkTypeConverter);
+        sparkTypeConverter,
+        writeAuthorized ? capabilityPolicy : DorisCapabilityPolicy.readOnly());
   }
 
   private Table createStrictSparkTable(
@@ -318,7 +371,8 @@ public abstract class GovernedDorisCatalog extends GravitinoJdbcCatalog {
         readSchema.schema(),
         propertiesConverter,
         sparkTransformConverter,
-        sparkTypeConverter);
+        sparkTypeConverter,
+        DorisCapabilityPolicy.readOnly());
   }
 
   private DorisReadSchema loadAndValidateReadSchema(
@@ -446,8 +500,8 @@ public abstract class GovernedDorisCatalog extends GravitinoJdbcCatalog {
   /**
    * Creates the governed table facade for the active Spark version.
    *
-   * <p>This factory is the stable extension seam for future batch writes, streaming writes, and
-   * governed DDL. The initial implementation deliberately exposes only batch reads.
+   * <p>This factory is the stable extension seam for authorized batch writes. Streaming writes and
+   * governed DDL remain unsupported.
    *
    * @param identifier the authorized table identifier
    * @param gravitinoTable the governed table metadata
@@ -465,7 +519,8 @@ public abstract class GovernedDorisCatalog extends GravitinoJdbcCatalog {
       StructType validatedSchema,
       PropertiesConverter propertiesConverter,
       SparkTransformConverter sparkTransformConverter,
-      SparkTypeConverter sparkTypeConverter) {
+      SparkTypeConverter sparkTypeConverter,
+      DorisCapabilityPolicy tableCapabilityPolicy) {
     return new GovernedDorisTable(
         identifier,
         gravitinoTable,
@@ -474,12 +529,17 @@ public abstract class GovernedDorisCatalog extends GravitinoJdbcCatalog {
         propertiesConverter,
         sparkTransformConverter,
         sparkTypeConverter,
-        getCapabilityPolicy());
+        tableCapabilityPolicy);
   }
 
   /** Returns the centralized capability policy used by the governed table facade. */
   protected DorisCapabilityPolicy getCapabilityPolicy() {
-    return defaultCapabilityPolicy;
+    return capabilityPolicy;
+  }
+
+  /** Returns the catalog-managed write policy. */
+  protected DorisWritePolicy getWritePolicy() {
+    return writePolicy;
   }
 
   /** Returns the catalog mutation delegate. Future versions may override this seam. */

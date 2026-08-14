@@ -25,8 +25,11 @@ cover property protection, credential resolution, explicit authorization orderin
 schema/type compatibility, cache behavior, hybrid planner state, capability filtering, plugin
 registration, provider loading, distribution assembly, repository container-label configuration,
 resolved Spark-module version consistency, immutable workflow action references, and the shared
-JDBC URL/driver/DBCP security matrix. The distribution contract compares `installDist`, tar, and
-zip file sets, rejects target-provided libraries, and scans every JAR for the MySQL Driver class.
+JDBC URL/driver/DBCP security matrix. They also cover Arrow fallback state/classification/circuit
+behavior, patch-aware write capabilities, forced sink options, write-schema validation, and direct
+rejection of unsupported write operations. The distribution contract compares `installDist`, tar,
+and zip file sets, rejects target-provided libraries, and scans every JAR for the MySQL Driver
+class.
 
 `distribution/gradle.lockfile` strictly locks the three production distribution configurations.
 `gradle/verification-metadata.xml` enables Gradle SHA-256 verification automatically for plugins,
@@ -51,6 +54,11 @@ These commands compile the integration-test source set but do not start Docker. 
 linkage, class loading, the packaged connector distribution, and the complete resolved
 `org.apache.spark` module set. They do not certify real Doris behavior on those two boundary
 versions. The full real-infrastructure certification remains pinned to Spark 3.5.8.
+
+Spark 3.5.0 through 3.5.2 are read-only. Spark 3.5.3 is the minimum write-aware API boundary and is
+validated with a real append/DATETIME smoke in addition to source compilation. Spark 3.5.8 remains
+the only full release/runtime matrix, while 3.5.9 is the current upper compile/unit/distribution
+compatibility boundary.
 
 ## Real-infrastructure gates
 
@@ -77,10 +85,28 @@ installation guidance while FE HTTP and MySQL/JDBC TCP counters remain zero.
 
 The tests verify direct-result parity, planner pushdown, four-partition JDBC parity, type
 normalization, authorization-before-I/O, cache/refresh, unsupported timestamp mutation before
-physical schema change, credential redaction, JDBC configuration rejection, read-only boundaries,
-and strict JDBC TLS transport. The logical/physical scalar and lossy-placeholder rejection matrix
-is exercised in focused unit tests because a real DDL changes both provider metadata and physical
-schema and cannot independently manufacture that mismatch.
+physical schema change, credential redaction, JDBC configuration rejection, capability
+boundaries, strict JDBC TLS transport, Arrow/Thrift fallback, and governed Stream Load writes. The
+logical/physical scalar and lossy-placeholder rejection matrix is exercised in focused unit tests
+because a real DDL changes both provider metadata and physical schema and cannot independently
+manufacture that mismatch.
+
+Arrow cases use real FE/BE Flight ports on both Doris versions. They cover the default no-Arrow
+path, successful Arrow reads, an unavailable port, probe success followed by lazy ADBC failure,
+same-application fail-sticky behavior, a new-application retry, and empty results. The TCP
+recorder stores counts only. Because the official ADBC client may open asynchronous connections
+after a failure, decision-bound assertions use the connector's hashed attempt counter while real
+proxy connections prove that transport was actually exercised. Failure after a row has been
+delivered is verified by unit test (TestDorisArrowFallbackPartitionReader35) using a FakeReader;
+real Doris fault injection for this path is not yet implemented.
+
+Write cases cover append, Gravitino `MODIFY_TABLE` denial before observed FE HTTP/JDBC I/O, Doris
+`LOAD_PRIV` denial, forced 2PC/strict/filter/schemaless/redirect options, DATETIME precision and
+time-zone round trips, explicit truncate success, and the documented empty-table result when a
+post-truncate load fails. The truncate account intentionally has `SELECT_PRIV, LOAD_PRIV` without
+`ALTER_PRIV` or `DROP_PRIV`: Connector 26.0.0 issues SQL `TRUNCATE TABLE`, and the certified Doris
+3.0.6.2 and 4.0.6 servers enforce that statement with `LOAD_PRIV`. Streaming, predicate/dynamic
+overwrite, and catalog DDL remain rejection tests.
 
 The harness creates a private CA, valid FE certificate, expired certificate, unrelated self-signed
 certificate, and client JVM truststore under `integration-tests/build/tmp`. Nothing containing a

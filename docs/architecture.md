@@ -12,7 +12,7 @@ uses published Gravitino 1.3.0 APIs instead of copying later framework classes i
 | --- | --- |
 | `BaseCatalog` template method | `GovernedDorisCatalog` authorizes the logical table before loading its Doris delegate |
 | `GravitinoJdbcCatalog` credential vending | `DorisCredentialResolver` requires exactly one vended `JdbcCredential` |
-| facade plus storage table delegate | `GovernedDorisTable` exposes the governed schema and read-only capability set |
+| facade plus storage table delegate | `GovernedDorisTable` exposes the governed schema and policy-filtered batch capabilities |
 | `PropertiesConverter` | `DorisPropertiesConverter` validates both Spark options and `spark.bypass.*` through one allow-list |
 | version-specific catalog adapter | `DorisCatalogClassResolver` resolves only Spark 3.5 and Scala 2.12 |
 | official driver plugin registration | `GovernedDorisDriverPlugin` composes the official plugin and adds only `doris-governed` |
@@ -54,7 +54,10 @@ subproject, and does not change Scala, Gravitino, or Doris Connector dependencie
 versions, and requires Spark core, SQL, and Catalyst to be present so an empty resolution cannot
 pass. CI runs that task with Spark 3.5.0 and 3.5.9 in separate processes and compiles the
 integration-test source set without starting Docker. These boundary smokes are not substitutes for
-the Spark 3.5.8 real-infrastructure matrix.
+the Spark 3.5.8 real-infrastructure matrix. Spark 3.5.0 through 3.5.2 retain the same read path but
+remain write-disabled. The public write-aware catalog overload is available from Spark 3.5.3;
+`DorisCatalogClassResolver` gates it by the parsed patch version without reflection or a second
+source set.
 
 ## Request flow
 
@@ -73,6 +76,14 @@ Spark SQL
      -> GovernedDorisTable
         -> hybrid: official tablet reader or Spark JDBCTable/JDBCScanBuilder
         -> strict-jdbc-tls: Spark JDBCTable/JDBCScanBuilder only
+
+Spark batch append on 3.5.3+
+  -> write-aware loadTable(identifier, MODIFY_TABLE)
+  -> authorized logical table and physical schema snapshot
+  -> exact write-schema validation
+  -> policy-filtered official Doris WriteBuilder
+  -> validating DataWriterFactory
+  -> official Stream Load writer with forced 2PC options
 ```
 
 An authorization exception exits before native catalog `loadTable`, FE HTTP, scan construction, or
@@ -130,6 +141,26 @@ build would not prove the contents of the final binary archive.
 
 The native lane handles lossless detail scans and keeps the official Doris Connector's tablet
 partitioning, projection, and supported predicates.
+
+When `doris-arrow-flight-sql-mode=preferred`, only the selected native detail lane is wrapped. The
+wrapper uses the official `DorisInputPartition`, fixes FE auto-discovery off, and obtains the Flight
+port only from the server-managed catalog property. A bounded TCP probe precedes the official
+lazy ADBC reader. Probe success does not imply that ADBC connection or query initialization will
+succeed; a classified transport failure during those steps can still transition to Thrift.
+
+Fallback is legal only before an Arrow row has been returned to Spark. The state machine
+distinguishes not-started, row-ready-but-not-delivered, delivered, exhausted, Thrift fallback, and
+closed states. Once `get()` successfully delivers the first Arrow row, all later failures fail the
+partition instead of replaying it. Normal empty results enter the exhausted state and never start
+Thrift. Unsupported/authentication/query/schema/data failures are not transport fallback signals.
+
+The first eligible failure opens an executor-JVM circuit keyed by SHA-256 of the Spark application
+ID and endpoint identity. Subsequent partitions in the same application skip probe and Arrow. The
+circuit intentionally has no automatic reset or background retry in this release: this bounds
+failure and native-resource churn but means a long-lived Spark Thrift Server or notebook keeps
+using Thrift after a transient outage. A new Spark application gets a new key. Arrow continues to
+produce `InternalRow` through the official row conversion path; it is not advertised as a native
+Spark columnar reader.
 
 The SQL lane is selected when:
 
@@ -216,20 +247,34 @@ therefore treat both as trusted principals. Tests separately inspect `EXPLAIN`, 
 logs, errors, and object rendering. Credential rotation takes effect when the Spark catalog is
 reinitialized, normally by recreating the Spark session.
 
-## Read-only policy and extension seams
+## Batch write and mutation boundary
 
-`DorisCapabilityPolicy` exposes only `BATCH_READ`. The table facade structurally implements
-`SupportsWrite`, but its write-builder entry point is unreachable through the advertised
-capabilities and explicitly rejects direct calls. Every Catalog DDL method already routes through
-`DorisCatalogMutationDelegate`, whose initial implementation rejects mutations.
-For `hybrid`, `DorisWriteDelegateFactory` is invoked after authorization and schema validation;
-its `DorisAuthorizedTableContext` retains the original official Doris physical table and validated
-read delegate without exposing credentials through string rendering. `strict-jdbc-tls` has no
-native physical table and deliberately bypasses this future write seam, remaining structurally
-read-only. The Spark 3.5 write-privilege load path is also policy-gated and reuses Gravitino's
-`MODIFY_TABLE` authorization when enabled. A future hybrid write implementation replaces the two
-delegates and capability policy; it does not replace plugin registration, authorization ordering,
-table facade, identifier handling, schema validation, or credential resolution.
+`DorisCapabilityPolicy` always exposes `BATCH_READ`. It adds `BATCH_WRITE` only when the catalog
+selects `doris-write-mode=batch` and the Spark patch is 3.5.3 or newer. It adds `TRUNCATE` only for
+the separate `doris-write-overwrite-mode=truncate` opt-in. It never exposes streaming write,
+overwrite-by-filter, or dynamic overwrite. Direct calls to disabled entry points fail closed.
+
+The write-aware table load requests Gravitino `MODIFY_TABLE` before it constructs a physical write
+delegate or performs Doris I/O. The authorized context retains the original official Doris table,
+the logical Gravitino table, the immutable physical snapshot, and the write policy without
+rendering credentials. Strict JDBC TLS has no native physical table and rejects all writes.
+
+Write schema validation requires exact column count, order, case-sensitive names, safe nullability,
+and the certified lossless Catalyst types. Read-normalized families remain unwritable except Doris
+DATETIME. For DATETIME, the writer accepts an exact precision-specific String for precision 0..6;
+Spark Timestamp inputs use Spark's normal assignment cast at analysis time, governed by
+`spark.sql.session.timeZone`, and the resulting String is checked per row. The wrapper validates
+before delegating every `InternalRow` to the official writer.
+
+The forced data-plane configuration is Stream Load, 2PC enabled, strict mode enabled,
+`max_filter_ratio=0`, schemaless disabled, and automatic redirect disabled. User-controlled raw or
+bypass options cannot replace those values. Driver commit/abort still delegates to the official
+connector's per-writer transaction messages; the project does not claim job-wide atomic commit.
+Append is supported. Optional full-table truncate uses the official non-atomic SQL
+`TRUNCATE TABLE`-then-load path and may leave an empty or partially loaded table after a later
+failure. Every Catalog DDL
+method continues to route through the rejecting mutation delegate, and streaming write, CTAS,
+UPDATE, DELETE, and MERGE remain unsupported.
 
 ## Requirement traceability
 
@@ -240,7 +285,8 @@ table facade, identifier handling, schema validation, or credential resolution.
 | Aggregate and Top-N | hybrid SQL lane | planner unit tests and differential IT plans/results |
 | JDBC performance parity | Spark `JDBCTable`, standard partition tuple, fetch size | four-partition direct-JDBC parity IT |
 | No readable type rejects the table | read-schema normalization | type-matrix unit tests and both Doris-version IT lanes |
-| No architecture rewrite for future writes | centralized policy and delegates | capability and explicit-rejection tests |
+| Governed batch append | patch-aware capability policy plus official Stream Load delegate | Spark 3.5.3 smoke and both Doris-version IT lanes |
+| First-row-safe Arrow fallback | partition-reader state machine and application-scoped circuit | reader unit matrix and real transport-failure IT |
 | JDBC configuration fails closed before I/O | shared `jdbc-security` module on server and Spark | exhaustive parser tests and malicious-catalog IT |
 | Authorization denial avoids observed Doris entry points | fresh catalog managers plus HTTP/TCP recorders | direct and SQL denial IT on both Doris versions |
 | Verified JDBC transport | strict profile, JVM truststore, JDBC-only schema/read catalog | trusted CA plus unknown-CA, hostname, expiry, and plaintext failures on both Doris versions |

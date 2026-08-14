@@ -14,7 +14,6 @@
 
 import java.nio.file.Files
 import java.nio.file.attribute.PosixFilePermissions
-import org.gradle.jvm.tasks.Jar
 
 description = "Standalone Gravitino, Spark, and Doris integration tests"
 
@@ -31,24 +30,11 @@ sourceSets {
     compileClasspath += sourceSets.main.get().output + configurations.testRuntimeClasspath.get()
     runtimeClasspath += output + compileClasspath
   }
-  create("performanceTest") {
-    java.setSrcDirs(listOf("src/performanceTest/java"))
-    resources.setSrcDirs(listOf("src/performanceTest/resources"))
-    compileClasspath +=
-        sourceSets.main.get().output +
-            sourceSets["integrationTest"].output +
-            configurations.testRuntimeClasspath.get()
-    runtimeClasspath += output + compileClasspath
-  }
 }
 
 configurations {
   named("integrationTestImplementation") { extendsFrom(configurations.testImplementation.get()) }
   named("integrationTestRuntimeOnly") { extendsFrom(configurations.testRuntimeOnly.get()) }
-  named("performanceTestImplementation") {
-    extendsFrom(configurations.testImplementation.get())
-  }
-  named("performanceTestRuntimeOnly") { extendsFrom(configurations.testRuntimeOnly.get()) }
 }
 
 dependencies {
@@ -132,82 +118,6 @@ val integrationTest by tasks.registering(Test::class) {
         "connector.installed.jdbc.driver.directory",
         installedExternalDriverDirectory.absolutePath)
     systemProperty("connector.tls.fixture.directory", tlsFixtureDirectory.absolutePath)
-  }
-  outputs.upToDateWhen { false }
-}
-
-val performanceTestJar by tasks.registering(Jar::class) {
-  description = "Builds the cluster-side Doris benchmark application."
-  archiveClassifier.set("performance")
-  from(sourceSets["performanceTest"].output)
-}
-
-val performanceTest by tasks.registering(Test::class) {
-  description = "Runs the opt-in Spark Standalone Doris performance matrix."
-  group = LifecycleBasePlugin.VERIFICATION_GROUP
-  testClassesDirs = sourceSets["performanceTest"].output.classesDirs
-  classpath = sourceSets["performanceTest"].runtimeClasspath
-  shouldRunAfter(integrationTest)
-  dependsOn(":distribution:installDist", performanceTestJar)
-  systemProperty("doris.version", providers.gradleProperty("dorisVersion").orElse("4.0.6").get())
-  systemProperty("connector.repository.root", rootProject.projectDir.absolutePath)
-  systemProperty(
-      "connector.benchmark.row-counts",
-      providers.gradleProperty("benchmarkRowCounts").orElse("100000,1000000,10000000").get())
-  systemProperty(
-      "connector.benchmark.warmups",
-      providers.gradleProperty("benchmarkWarmups").orElse("2").get())
-  systemProperty(
-      "connector.benchmark.runs",
-      providers.gradleProperty("benchmarkRuns").orElse("5").get())
-  maxHeapSize = "2g"
-  doFirst {
-    val providerDirectory =
-        project(":distribution")
-            .layout
-            .buildDirectory
-            .dir("install/gravitino-doris-spark-connector/gravitino/catalogs/doris-governed")
-            .get()
-            .asFile
-            .canonicalFile
-    val distributionDirectory =
-        project(":distribution")
-            .layout
-            .buildDirectory
-            .dir("install/gravitino-doris-spark-connector")
-            .get()
-            .asFile
-            .canonicalFile
-    val jdbcDriver = externalTestJdbcDriver.singleFile.canonicalFile
-    val temporaryRoot =
-        Files.createDirectories(layout.buildDirectory.dir("tmp").get().asFile.toPath())
-    val installedExternalDriverDirectory =
-        Files.createTempDirectory(temporaryRoot, "benchmark-jdbc-driver-").toFile().canonicalFile
-    Files.setPosixFilePermissions(
-        installedExternalDriverDirectory.toPath(),
-        PosixFilePermissions.fromString("rwxr-xr-x"))
-    Files.copy(
-        jdbcDriver.toPath(),
-        installedExternalDriverDirectory.toPath().resolve("mysql-connector-java-8.0.33.jar"))
-    val resultsDirectory =
-        Files.createDirectories(layout.buildDirectory.dir("performance-results").get().asFile.toPath())
-            .toFile()
-            .canonicalFile
-    val secretsRoot =
-        Files.createDirectories(layout.buildDirectory.dir("tmp/performance-secrets").get().asFile.toPath())
-            .toFile()
-            .canonicalFile
-    systemProperty("connector.provider.directory", providerDirectory.absolutePath)
-    systemProperty("connector.distribution.directory", distributionDirectory.absolutePath)
-    systemProperty("connector.mysql.driver.path", jdbcDriver.absolutePath)
-    systemProperty(
-        "connector.installed.jdbc.driver.directory",
-        installedExternalDriverDirectory.absolutePath)
-    systemProperty(
-        "connector.performance.jar",
-        performanceTestJar.get().archiveFile.get().asFile.canonicalPath)
-    systemProperty("connector.performance.results", resultsDirectory.absolutePath)
-    systemProperty("connector.performance.secrets.root", secretsRoot.absolutePath)
   }
   outputs.upToDateWhen { false }
 }

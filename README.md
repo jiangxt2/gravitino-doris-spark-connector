@@ -277,17 +277,6 @@ Real-infrastructure tests run embedded Spark 3.5.8 plus Docker-managed Gravitino
 ./gradlew integrationTest -PdorisVersion=4.0.6
 ```
 
-The opt-in performance harness uses one cluster-mode driver and two executors placed on three
-separate Spark Standalone workers. The default matrix is capped at ten million rows:
-
-```bash
-./gradlew performanceTest -PdorisVersion=4.0.6
-```
-
-It writes an atomic manifest, a redacted Spark-submit log, and Spark event logs under
-`integration-tests/build/performance-results/`. Performance evidence is workload-specific; the
-project does not claim that Arrow or every governed lane is universally faster than JDBC.
-
 On macOS, start `mac-docker-connector` before the Docker tests. The tests use the routed
 `10.20.30.0/28` subnet and apply Docker Engine 28's `nat-unprotected` gateway mode only to that
 dedicated test network. They never restart Docker or run a prune operation. See

@@ -258,68 +258,6 @@ CI uploads reports when a gate fails. Failure-time Docker inventory and log coll
 containers labeled `io.github.jiangxt2.gravitino-doris-spark-connector.it=true`; the integration
 tests verify that Doris FE, Doris BE, Gravitino, and the TCP proxy carry that label.
 
-## Spark Standalone performance harness
-
-The performance source set is opt-in and is not attached to ordinary `check`:
-
-```bash
-./gradlew performanceTest -PdorisVersion=4.0.6
-```
-
-Defaults are row counts `100000,1000000,10000000`, two warm-ups, and five measured runs. Override
-only for a diagnostic smoke with `-PbenchmarkRowCounts`, `-PbenchmarkWarmups`, and
-`-PbenchmarkRuns`; row counts above ten million and measured runs below three are rejected.
-
-One Spark 3.5.8 Standalone master and three distinct two-core/two-GiB workers are started. Cluster
-deploy mode places the two-core/one-GiB driver alone on one worker and exactly two
-two-core/one-GiB executors on the other two. This profile leaves a measured safety margin for Doris
-and Gravitino in the 15.6-GiB Docker VM used for local certification; the master and worker control
-daemons each use an explicit 512-MiB heap instead of Spark's one-GiB default. Dynamic allocation, AQE,
-speculation, and the UI are disabled; Kryo, UTC, 16 shuffle/default partitions, compression, and
-event logging are fixed.
-Placement is verified by the driver before any sample.
-
-Read baselines are unmodified Gravitino JDBC, bare official Thrift, governed SQL, governed native
-Thrift, and governed Arrow fallback at every configured scale. Successful bare official Arrow and
-governed Arrow throughput samples are collected at 100,000 and 1,000,000 rows. Repeated 10,000,000-
-row Flight SQL actions are deliberately excluded: a real formal run on the fixed 15.6-GiB Docker VM
-reached Doris's 256-MiB system low-water guard and failed with `MEM_ALLOC_FAILED`/
-`MEM_LIMIT_EXCEEDED`. The harness records `arrowMeasurementMaximumRows=1000000`; it does not lower
-Doris's safety threshold or report the failed 10-million-row path as a performance result. JDBC
-catalogs are created per row count so `upperBound` matches the table instead of collapsing smaller
-fixtures into one active partition. Write baselines are Spark JDBC batch append, bare official
-Stream Load, and governed Stream Load; bare and governed Stream Load use the same forced sink
-options.
-
-The one permitted rerun with successful Arrow samples capped at one million rows also stopped at
-Doris's low-water guard after 53 successful randomized warm-up cases, this time while comparing a
-10-million-row wide JDBC scan. Several individual 10-million-row native, Thrift, fallback, and JDBC
-actions had already completed. This distinguishes per-action correctness from sustained-matrix
-capacity: the fixed local VM cannot publish trustworthy median/MAD/confidence-interval rankings for
-the full default matrix. Both failures retain XML/HTML reports and Spark event logs, and neither
-publishes a manifest. Run the default matrix only on a larger isolated Docker VM; diagnostic row or
-iteration overrides are smoke evidence and must not be compared with the fixed profile.
-
-The monotonic timer encloses only the materializing read or write action. Write-target COUNT/SUM
-verification, FE/BE metric fetch, Spark listener drain, and host orchestration time are outside that
-window. Every sample stores rows/s, logical MiB/s, row count/checksum, requested/actual partitions,
-isolated Spark task metrics, and label-free Doris metric deltas/after-values for relevant query,
-scan, load, transaction, rowset, compaction, CPU, network, disk, and memory series. The Doris
-metrics come from the documented FE/BE `/metrics` endpoints. Median, MAD, and a deterministic
-bootstrap confidence interval exclude warm-ups.
-
-Each run writes `manifest-<run-id>.json` through a sibling temporary file and atomic rename. The
-host accepts success only when the run ID matches, the manifest exists without its temporary file,
-and a non-empty Spark event log exists. A redacted `spark-submit-<run-id>.log`, the event log, and
-host `orchestration-<run-id>.properties` remain under
-`integration-tests/build/performance-results/<run-id>/`. Credentials and endpoint values are not
-persisted in the manifest. JDBC, Doris, metrics, and internal Gravitino endpoint values are loaded
-from a read-only ephemeral runtime-properties mount instead of application arguments, so Spark's
-persisted `sun.java.command` does not retain them. The fixed Spark and SQL option redaction regexes
-also redact URL, user, password, credential, secret, and token keys from persisted environment and
-plan records. Results describe only the recorded Doris/Spark/version/workload/profile; they must
-not be generalized into a universal Arrow or connector performance claim.
-
 ## Release evidence boundary
 
 These tests verify dependency resolution, locked production graphs, archive contents, and the

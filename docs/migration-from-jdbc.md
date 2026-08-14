@@ -86,9 +86,3 @@ capability or support statement of an unmodified Gravitino distribution.
 Keep existing `jdbc-doris` catalogs unchanged during migration. Create a separate
 `doris-governed` catalog, grant a pilot role, compare results and plans, then move workloads. The
 wrapper plugin intentionally never intercepts or removes `jdbc-doris`.
-
-Run read and write correctness comparisons before performance measurement. The project performance
-harness includes Gravitino JDBC, bare official Connector, and governed lanes on the same Spark
-Standalone application, reports governance overhead separately from data-plane differences, and
-caps fixtures at ten million rows. A result is evidence only for its recorded workload, row count,
-partitioning, Doris/Spark versions, and confidence interval.
